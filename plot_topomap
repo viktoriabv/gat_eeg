@@ -1,0 +1,474 @@
+import os
+import logging
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GATv2Conv, global_mean_pool
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.model_selection import train_test_split
+from collections import defaultdict, Counter
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib import cm
+from matplotlib.colors import Normalize
+import mne
+import warnings
+from scipy.signal import welch, coherence
+from scipy.interpolate import griddata
+from datetime import datetime
+
+# Настройка окружения
+logging.getLogger('mne').setLevel(logging.WARNING)
+warnings.filterwarnings('ignore')
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"🖥️ Устройство: {device}")
+
+file_paths = [
+    r'C:\Users\ejevi\Downloads\chb02_30.edf', r'C:\Users\ejevi\Downloads\chb04_08.edf',
+    r'C:\Users\ejevi\Downloads\chb04_01.edf', r'C:\Users\ejevi\Downloads\chb04_28.edf',
+    r'C:\Users\ejevi\Downloads\chb02_09.edf', r'C:\Users\ejevi\Downloads\chb02_16+.edf',
+    r'C:\Users\ejevi\Downloads\chb01_07.edf', r'C:\Users\ejevi\Downloads\chb04_05.edf',
+    r'C:\Users\ejevi\Downloads\chb02_06.edf', r'C:\Users\ejevi\Downloads\chb02_19.edf',
+    r'C:\Users\ejevi\Downloads\chb01_06.edf', r'C:\Users\ejevi\Downloads\chb01_04.edf',
+    r'C:\Users\ejevi\Downloads\chb01_01.edf', r'C:\Users\ejevi\Downloads\chb01_12.edf',
+    r'C:\Users\ejevi\Downloads\chb01_18.edf', r'C:\Users\ejevi\Downloads\chb06_01.edf',
+    r'C:\Users\ejevi\Downloads\chb06_04.edf', r'C:\Users\ejevi\Downloads\chb06_14.edf',
+    r'C:\Users\ejevi\Downloads\chb06_18.edf', r'C:\Users\ejevi\Downloads\chb06_24.edf',
+    r'C:\Users\ejevi\Downloads\chb06_08.edf', r'C:\Users\ejevi\Downloads\chb13_40.edf',
+    r'C:\Users\ejevi\Downloads\chb13_55.edf', r'C:\Users\ejevi\Downloads\chb13_21.edf',
+    r'C:\Users\ejevi\Downloads\chb13_04.edf', r'C:\Users\ejevi\Downloads\chb13_15.edf',
+    r'C:\Users\ejevi\Downloads\chb20_21.edf', r'C:\Users\ejevi\Downloads\chb20_31.edf',
+    r'C:\Users\ejevi\Downloads\chb20_12.edf', r'C:\Users\ejevi\Downloads\chb20_13.edf',
+    r'C:\Users\ejevi\Downloads\chb20_68.edf', r'C:\Users\ejevi\Downloads\chb20_06.edf',
+    r'C:\Users\ejevi\Downloads\chb10_06.edf', r'C:\Users\ejevi\Downloads\chb10_08.edf',
+    r'C:\Users\ejevi\Downloads\chb10_20.edf', r'C:\Users\ejevi\Downloads\chb10_22.edf',
+    r'C:\Users\ejevi\Downloads\chb10_30.edf', r'C:\Users\ejevi\Downloads\chb10_89.edf',
+    r'C:\Users\ejevi\Downloads\chb18_30.edf', r'C:\Users\ejevi\Downloads\chb18_32.edf',
+    r'C:\Users\ejevi\Downloads\chb18_35.edf', r'C:\Users\ejevi\Downloads\chb18_01.edf',
+    r'C:\Users\ejevi\Downloads\chb18_08.edf', r'C:\Users\ejevi\Downloads\chb18_15.edf',
+    r'C:\Users\ejevi\Downloads\chb16_14.edf', r'C:\Users\ejevi\Downloads\chb16_18.edf',
+    r'C:\Users\ejevi\Downloads\chb16_10.edf', r'C:\Users\ejevi\Downloads\chb16_01.edf',
+    r'C:\Users\ejevi\Downloads\chb16_06.edf', r'C:\Users\ejevi\Downloads\chb16_19.edf',
+    r'C:\Users\ejevi\Downloads\chb08_02.edf', r'C:\Users\ejevi\Downloads\chb08_05.edf',
+    r'C:\Users\ejevi\Downloads\chb08_10.edf', r'C:\Users\ejevi\Downloads\chb08_13.edf',
+    r'C:\Users\ejevi\Downloads\chb08_14.edf', r'C:\Users\ejevi\Downloads\chb08_21.edf',
+    r'C:\Users\ejevi\Downloads\chb12_06.edf', r'C:\Users\ejevi\Downloads\chb12_09.edf',
+    r'C:\Users\ejevi\Downloads\chb12_23.edf', r'C:\Users\ejevi\Downloads\chb12_19.edf',
+    r'C:\Users\ejevi\Downloads\chb12_28.edf', r'C:\Users\ejevi\Downloads\chb12_32.edf',
+    r'C:\Users\ejevi\Downloads\chb12_40.edf', r'C:\Users\ejevi\Downloads\chb05_01.edf',
+    r'C:\Users\ejevi\Downloads\chb05_06.edf', r'C:\Users\ejevi\Downloads\chb05_16.edf',
+    r'C:\Users\ejevi\Downloads\chb05_17.edf', r'C:\Users\ejevi\Downloads\chb05_10.edf',
+    r'C:\Users\ejevi\Downloads\chb05_20.edf', r'C:\Users\ejevi\Downloads\chb05_27.edf',
+    r'C:\Users\ejevi\Downloads\chb05_34.edf', r'C:\Users\ejevi\Downloads\chb07_06.edf',
+    r'C:\Users\ejevi\Downloads\chb07_07.edf', r'C:\Users\ejevi\Downloads\chb07_13.edf',
+    r'C:\Users\ejevi\Downloads\chb07_12.edf', r'C:\Users\ejevi\Downloads\chb07_01.edf',
+    r'C:\Users\ejevi\Downloads\chb07_18.edf', r'C:\Users\ejevi\Downloads\chb03_01.edf',
+    r'C:\Users\ejevi\Downloads\chb03_02.edf', r'C:\Users\ejevi\Downloads\chb03_03.edf',
+    r'C:\Users\ejevi\Downloads\chb03_04.edf', r'C:\Users\ejevi\Downloads\chb03_05.edf',
+    r'C:\Users\ejevi\Downloads\chb03_25.edf', r'C:\Users\ejevi\Downloads\chb03_28.edf',
+    r'C:\Users\ejevi\Downloads\chb03_32.edf', r'C:\Users\ejevi\Downloads\chb09_01.edf',
+    r'C:\Users\ejevi\Downloads\chb09_05.edf', r'C:\Users\ejevi\Downloads\chb09_06.edf',
+    r'C:\Users\ejevi\Downloads\chb09_08.edf', r'C:\Users\ejevi\Downloads\chb09_10.edf',
+    r'C:\Users\ejevi\Downloads\chb09_17.edf', r'C:\Users\ejevi\Downloads\chb09_19.edf',
+    r'C:\Users\ejevi\Downloads\chb09_12.edf', r'C:\Users\ejevi\Downloads\chb09_18.edf',
+    r'C:\Users\ejevi\Downloads\chb09_04.edf', r'C:\Users\ejevi\Downloads\chb14_04.edf',
+    r'C:\Users\ejevi\Downloads\chb14_06.edf', r'C:\Users\ejevi\Downloads\chb14_12.edf',
+    r'C:\Users\ejevi\Downloads\chb14_16.edf', r'C:\Users\ejevi\Downloads\chb14_18.edf',
+    r'C:\Users\ejevi\Downloads\chb14_01.edf', r'C:\Users\ejevi\Downloads\chb14_03.edf',
+    r'C:\Users\ejevi\Downloads\chb14_25.edf', r'C:\Users\ejevi\Downloads\chb15_01.edf',
+    r'C:\Users\ejevi\Downloads\chb15_02.edf', r'C:\Users\ejevi\Downloads\chb15_03.edf',
+    r'C:\Users\ejevi\Downloads\chb15_04.edf', r'C:\Users\ejevi\Downloads\chb15_05.edf',
+    r'C:\Users\ejevi\Downloads\chb15_07.edf', r'C:\Users\ejevi\Downloads\chb17a_03.edf',
+    r'C:\Users\ejevi\Downloads\chb17a_04.edf', r'C:\Users\ejevi\Downloads\chb17b_63.edf',
+]
+
+labels = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1,
+          1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 1,
+          1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1,
+          1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1,
+          1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0,
+          0, 0, 0, 0, 0, 0, 1, 1, 1]
+
+assert len(file_paths) == len(labels)
+print(f"📂 Загружено {len(file_paths)} файлов.")
+
+
+def preprocess_edf_data(file_paths, labels):
+    from mne.time_frequency import psd_array_welch
+    from mne.preprocessing import ICA
+    
+    clean_data, clean_labels, clean_ch_names = [], [], []
+    
+    for fp, lbl in zip(file_paths, labels):
+        try:
+            raw = mne.io.read_raw_edf(fp, preload=True, verbose=False)
+            bad_p = ('--', '.', 'EEG', 'ECG', 'EMG', 'EKG', 'DC')
+            valid = [ch.strip() for ch in raw.ch_names 
+                     if ch.strip() and not any(ch.strip().upper().startswith(p) for p in bad_p) 
+                     and any(c.isalpha() for c in ch.strip())]
+            valid = list(dict.fromkeys(valid))
+            if len(valid) < 5: continue
+            raw.pick(valid)
+            
+            tmin, tmax = 0, min(120, raw.times[-1])
+            fname = os.path.basename(fp)
+            crop_rules = {
+                "chb01_04": (1450, 1570), "chb01_18": (1700, 1820), "chb02_16+": (2960, 3080),
+                "chb02_19": (3340, 3460), "chb12_06": (3340, 3460), "chb04_05": (7750, 7870),
+                "chb06_18": (7750, 7870), "chb04_08": (6440, 6560), "chb04_28": (3780, 3900),
+                "chb06_01": (7410, 7530), "chb06_04": (270, 390), "chb06_24": (9300, 9420),
+                "chb13_21": (900, 1020), "chb13_40": (500, 620), "chb18_30": (500, 620),
+                "chb13_55": (400, 520), "chb20_12": (60, 180), "chb20_13": (2440, 2560),
+                "chb20_68": (1350, 1470), "chb10_89": (1350, 1470), "chb10_20": (6850, 6970),
+                "chb10_30": (3000, 3120), "chb12_09": (3000, 3120), "chb18_32": (1850, 1970),
+                "chb18_35": (2170, 2290), "chb16_10": (2200, 2320), "chb16_14": (1800, 1920),
+                "chb16_18": (1850, 1970), "chb14_06": (1850, 1970), "chb08_02": (2670, 2790),
+                "chb08_05": (2850, 2970), "chb08_13": (2420, 2540), "chb08_21": (2080, 2200),
+                "chb12_23": (600, 720), "chb12_28": (140, 260), "chb05_06": (410, 530),
+                "chb03_03": (410, 530), "chb05_16": (2300, 2420), "chb05_17": (2450, 2570),
+                "chb07_12": (4900, 5020), "chb07_13": (3280, 3400), "chb03_01": (330, 450),
+                "chb03_02": (700, 820), "chb03_04": (2100, 2220), "chb09_06": (12200, 12320),
+                "chb09_08": (2940, 3060), "chb09_19": (5250, 5370), "chb14_03": (1950, 2070),
+                "chb14_04": (2750, 2870), "chb14_18": (1000, 1120), "chb17a_03": (2270, 2390),
+                "chb17a_04": (3020, 3140), "chb17b_63": (3120, 3240)
+            }
+            for k, v in crop_rules.items():
+                if k in fname: tmin, tmax = v; break
+            if tmax > raw.times[-1]: tmax = raw.times[-1]
+            raw.crop(tmin=tmin, tmax=tmax, include_tmax=False)
+            
+            try: raw.set_eeg_reference('average', projection=True, verbose=False)
+            except: pass
+            raw.filter(1.0, 45.0, fir_design='firwin', verbose=False)
+            
+            n_ch = len(raw.ch_names)
+            ica = ICA(n_components=min(n_ch-1, 20), random_state=42, method='fastica', max_iter=500, verbose=False)
+            ica.fit(raw)
+            
+            src = ica.get_sources(raw).get_data()
+            psds, freqs = psd_array_welch(src, sfreq=raw.info['sfreq'], fmin=1, fmax=80, n_fft=1024)
+            ica.exclude = [i for i, p in enumerate(psds) if p[np.argmin(np.abs(freqs-60))] > np.percentile(p, 90)]
+            raw_clean = ica.apply(raw.copy())
+            
+            clean_data.append(raw_clean.get_data())
+            clean_labels.append(lbl)
+            clean_ch_names.append(raw_clean.ch_names)
+        except Exception as e:
+            pass
+    return clean_data, clean_labels, clean_ch_names
+
+print("🔄 Предобработка ЭЭГ...")
+clean_data_list, label_list, channel_names_list = preprocess_edf_data(file_paths, labels)
+print(f"✅ Готово: {len(clean_data_list)} записей.")
+
+
+def signal_to_graph_spectral(data, sfreq=256.0, fmin=1.0, fmax=45.0, coh_thresh=0.1):
+    n_ch, n_t = data.shape
+    bands = {'delta':(1,4), 'theta':(4,8), 'alpha':(8,13), 'beta':(13,30), 'gamma':(30,45)}
+    spec = []
+    for ch in data:
+        f, p = welch(ch, fs=sfreq, nperseg=min(256, n_t))
+        spec.append([np.mean(p[(f>=lo)&(f<=hi)]) if np.any((f>=lo)&(f<=hi)) else 0.0 for lo, hi in bands.values()])
+    spec = np.array(spec)
+    spec = (spec - spec.mean(axis=0)) / (spec.std(axis=0) + 1e-8)
+    x = torch.tensor(np.hstack([data.mean(axis=1, keepdims=True), data.std(axis=1, keepdims=True), spec]), dtype=torch.float)
+    
+    coh = np.zeros((n_ch, n_ch))
+    nperseg = min(256, n_t)
+    for i in range(n_ch):
+        for j in range(i+1, n_ch):
+            f, c = coherence(data[i], data[j], fs=sfreq, nperseg=nperseg, noverlap=nperseg//2)
+            coh[i,j] = coh[j,i] = np.mean(c[(f>=fmin)&(f<=fmax)]) if np.any((f>=fmin)&(f<=fmax)) else 0
+            
+    ei, ea = [], []
+    for i in range(n_ch):
+        for j in range(n_ch):
+            if i!=j and coh[i,j]>coh_thresh:
+                ei.append([i,j]); ea.append(coh[i,j])
+    ei = torch.tensor(ei, dtype=torch.long).t().contiguous() if ei else torch.empty((2,0), dtype=torch.long)
+    ea = torch.tensor(ea, dtype=torch.float).unsqueeze(1) if ea else torch.empty((0,1), dtype=torch.float)
+    return Data(x=x, edge_index=ei, edge_attr=ea)
+
+def augment_and_build_graphs(data_list, labels_list, ch_names_list, win=7680, step=3840):
+    aug_data, aug_lbl, aug_ch = [], [], []
+    for d, l, c in zip(data_list, labels_list, ch_names_list):
+        if d.shape[1] < win: continue
+        n_win = max(1, (d.shape[1]-win)//step + 1)
+        for i in range(n_win):
+            aug_data.append(d[:, i*step:i*step+win])
+            aug_lbl.append(l); aug_ch.append(c)
+            
+    graphs, final_l, final_c = [], [], []
+    for d, l, c in zip(aug_data, aug_lbl, aug_ch):
+        g = signal_to_graph_spectral(d)
+        if g.edge_index.shape[1] > 0 and g.num_nodes >= 2:
+            g.y = torch.tensor(l, dtype=torch.long)
+            graphs.append(g)
+            final_l.append(l)
+            final_c.append(c)
+    return graphs, final_l, final_c
+
+print("🔄 Аугментация и построение графов (7 признаков)...")
+graph_dataset, final_labels, final_ch_names = augment_and_build_graphs(clean_data_list, label_list, channel_names_list)
+print(f"✅ Датасет: {len(graph_dataset)} графов. Классы: {Counter(final_labels)}")
+
+
+class GAT7(nn.Module):
+    def __init__(self, in_ch=7, hidden=64, out_ch=2, heads=4):
+        super().__init__()
+        self.conv1 = GATv2Conv(in_ch, hidden, heads=heads, edge_dim=1)
+        self.conv2 = GATv2Conv(hidden*heads, hidden, heads=2, edge_dim=1)
+        self.fc = nn.Linear(hidden*2, out_ch)
+        self.drop = nn.Dropout(0.2)
+    def forward(self, x, ei, ea, batch):
+        x = F.elu(self.conv1(x, ei, ea))
+        x = self.drop(x)
+        x = F.elu(self.conv2(x, ei, ea))
+        x = global_mean_pool(x, batch)
+        return self.fc(x)
+
+def train_epoch(model, loader, opt, criterion, cw=None):
+    model.train(); loss_sum=0
+    for b in loader:
+        b = b.to(device)
+        opt.zero_grad()
+        out = model(b.x, b.edge_index, b.edge_attr, b.batch)
+        loss = criterion(out, b.y.view(-1), weight=cw)
+        loss.backward(); opt.step()
+        loss_sum += loss.item()
+    return loss_sum/len(loader)
+
+def evaluate(model, loader):
+    model.eval(); preds, trues = [], []
+    with torch.no_grad():
+        for b in loader:
+            b = b.to(device)
+            out = model(b.x, b.edge_index, b.edge_attr, b.batch)
+            preds.extend(out.argmax(1).cpu().numpy())
+            trues.extend(b.y.view(-1).cpu().numpy())
+    return accuracy_score(trues, preds), f1_score(trues, preds, average='weighted', zero_division=0)
+
+idx = list(range(len(graph_dataset)))
+tr_idx, val_idx = train_test_split(idx, test_size=0.2, random_state=42, stratify=final_labels)
+train_ds = [graph_dataset[i] for i in tr_idx]
+val_ds   = [graph_dataset[i] for i in val_idx]
+train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
+val_loader   = DataLoader(val_ds, batch_size=16)
+
+cw = torch.tensor([1.0, 3.0], device=device)
+model = GAT7(in_ch=7, hidden=64, out_ch=2).to(device)
+opt = optim.Adam(model.parameters(), lr=0.003, weight_decay=1e-4)
+crit = F.cross_entropy
+
+best_f1, best_state, patience, cnt = 0, None, 30, 0
+print("🚀 Обучение модели (7 признаков)...")
+for ep in range(100):
+    loss = train_epoch(model, train_loader, opt, crit, cw)
+    acc, f1 = evaluate(model, val_loader)
+    if f1 > best_f1:
+        best_f1, best_state, cnt = f1, {k:v.clone() for k,v in model.state_dict().items()}, 0
+    else: cnt += 1
+    if (ep+1)%10==0: print(f"  Epoch {ep+1:02d} | Loss:{loss:.4f} | Acc:{acc:.3f} | F1:{f1:.3f}")
+    if cnt >= patience: print(f"⏹️ Early stop на эпохе {ep+1}"); break
+
+model.load_state_dict(best_state)
+print(f"✅ Лучший F1 на валидации: {best_f1:.3f}")
+
+def plot_circular_topomap(channels, values, ch_pos_dict, title='Внимание', 
+                          cmap='RdYlBu_r', ax=None):
+    """Рисует одну карту с интерполяцией до края круга."""
+    valid = [(ch, ch_pos_dict.get(ch.upper())) for ch in channels]
+    valid = [(ch, pos) for ch, pos in valid if pos is not None]
+    if len(valid) < 4: return None
+    
+    ch_names = [ch for ch, _ in valid]
+    ch_vals = np.array([values[channels.index(ch)] for ch in ch_names])
+    coords_2d = np.array([[pos[0], pos[1]] for _, pos in valid])
+    
+    radii = np.sqrt(np.sum(coords_2d**2, axis=1))
+    max_radius = radii.max()
+    if max_radius > 0.01:
+        scale = 0.42 / max_radius
+        coords_2d = coords_2d * scale
+    
+    n_boundary = 24
+    boundary_c, boundary_v = [], []
+    for angle in np.linspace(0, 2*np.pi, n_boundary, endpoint=False):
+        bx, by = 0.49 * np.cos(angle), 0.49 * np.sin(angle)
+        dists = np.sqrt((coords_2d[:,0]-bx)**2 + (coords_2d[:,1]-by)**2)
+        nearest = np.argsort(dists)[:3]
+        weights = 1.0 / (dists[nearest] + 0.01); weights /= weights.sum()
+        boundary_c.append([bx, by]); boundary_v.append(np.sum(ch_vals[nearest] * weights))
+    
+    all_c, all_v = np.vstack([coords_2d, boundary_c]), np.hstack([ch_vals, boundary_v])
+    grid_x, grid_y = np.mgrid[-0.5:0.5:150j, -0.5:0.5:150j]
+    grid_z = griddata(all_c, all_v, (grid_x, grid_y), method='cubic', fill_value=np.nan)
+    mask = grid_x**2 + grid_y**2 <= 0.5**2
+    grid_z[~mask] = np.nan
+    
+    norm = Normalize(vmin=ch_vals.min(), vmax=ch_vals.max())
+    standalone = ax is None
+    if standalone: fig, ax = plt.subplots(figsize=(6, 5.5))
+    
+    cf = ax.contourf(grid_x, grid_y, grid_z, levels=60, cmap=cmap, norm=norm, alpha=0.95)
+    ax.add_patch(patches.Circle((0, 0), 0.5, fill=False, edgecolor='black', linewidth=2, zorder=10))
+    
+    if standalone:
+        ax.plot([-0.52, -0.58], [0,0], 'k-', lw=3); ax.plot([0.52, 0.58], [0,0], 'k-', lw=3)
+        ax.text(-0.62, 0, 'L', ha='right', va='center', fontweight='bold'); ax.text(0.62, 0, 'R', ha='left', va='center', fontweight='bold')
+        ax.plot([0,0], [0.5,0.56], 'k-', lw=2); ax.text(0, 0.59, 'N', ha='center', va='bottom', fontweight='bold')
+        fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04).set_label('Внимание', rotation=270, labelpad=20)
+
+    for i, (ch, (x,y)) in enumerate(zip(ch_names, coords_2d)):
+        ax.add_patch(patches.Circle((x,y), 0.015, color=cm.get_cmap(cmap)(norm(ch_vals[i])), 
+                                    ec='k', lw=1.2, zorder=12))
+        r = np.sqrt(x**2+y**2); dx, dy = ((x/r)*0.055, (y/r)*0.055) if r > 0.02 else (0, 0.055)
+      
+        ax.text(x+dx, y+dy, ch, ha='center', va='center', fontsize=6.5, fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.15', facecolor='white', alpha=0.9, edgecolor='gray'), zorder=13)
+        
+    ax.set_xlim(-0.55, 0.55); ax.set_ylim(-0.55, 0.55); ax.set_aspect('equal'); ax.axis('off')
+    ax.set_title(f'🧠 {title}', fontweight='bold', pad=10)
+    if standalone: plt.tight_layout(); plt.show()
+    return ax
+
+def visualize_attention_comparison(model, graphs, ch_lists, device, save_path='gat_comparison.png'):
+    """Сравнение Preictal vs Interictal + Важность признаков (Bar Chart) + Выводы."""
+    preictal = [(g, c) for g, c in zip(graphs, ch_lists) if g.y.item() == 1]
+    interictal = [(g, c) for g, c in zip(graphs, ch_lists) if g.y.item() == 0]
+    
+    def compute_attention(class_graphs, common):
+        c2i = {ch: i for i, ch in enumerate(common)}
+        node_sum = np.zeros((len(common), 7)); edge_sum = defaultdict(float); valid_n = 0
+        for g, chs in class_graphs:
+            l2c = {i: c2i[ch] for i, ch in enumerate(chs) if ch in c2i}
+            if len(l2c) < len(common) * 0.8: continue
+            valid_n += 1
+            for loc, com in l2c.items(): node_sum[com] += g.x[loc, :7].cpu().numpy()
+            ei, ea = g.edge_index.cpu().numpy(), g.edge_attr.cpu().numpy().flatten() if g.edge_attr is not None else np.ones(g.edge_index.shape[1])
+            for i in range(ei.shape[1]):
+                if ei[0,i] in l2c and ei[1,i] in l2c:
+                    edge_sum[tuple(sorted((l2c[ei[0,i]], l2c[ei[1,i]])))] += ea[i]
+        valid_n = max(valid_n, 1); node_avg = node_sum / valid_n
+        ei_l, ea_l = [], []
+        for (s,d), w in edge_sum.items():
+            aw = w/valid_n
+            if aw > 0.05: ei_l.extend([[s,d],[d,s]]); ea_l.extend([aw, aw])
+        ei = torch.tensor(ei_l, dtype=torch.long).t().contiguous() if ei_l else torch.empty((2,0), dtype=torch.long)
+        ea = torch.tensor(ea_l, dtype=torch.float).unsqueeze(1) if ea_l else torch.empty((0,1), dtype=torch.float)
+        
+        avg_g = Data(x=torch.tensor(node_avg, dtype=torch.float), edge_index=ei, edge_attr=ea)
+        model.eval()
+        with torch.no_grad():
+            _, att = model.conv1(avg_g.x.to(device), avg_g.edge_index.to(device), avg_g.edge_attr.to(device), return_attention_weights=True)
+            edge_imp = att[1].mean(dim=1).cpu().numpy()
+            node_imp = np.zeros(len(common))
+            for i, (s, d) in enumerate(att[0].cpu().numpy().T):
+                node_imp[s] += edge_imp[i]; node_imp[d] += edge_imp[i]
+        if node_imp.max() > node_imp.min(): node_imp = (node_imp - node_imp.min()) / (node_imp.max() - node_imp.min())
+        return node_imp, node_avg
+
+    all_ch = [ch for _, chs in preictal+interictal for ch in chs]
+    ch_cnt = Counter(all_ch); n_total = len(preictal) + len(interictal)
+    common = sorted([ch for ch, cnt in ch_cnt.items() if cnt >= 0.9 * n_total])
+    print(f"🔄 Построение карт для {len(common)} каналов...")
+    
+    pre_imp, _ = compute_attention(preictal, common)
+    inter_imp, _ = compute_attention(interictal, common)
+    
+    def agg(imp):
+        a = {}; 
+        for ch, val in zip(common, imp):
+            ch_n = ch.upper()
+            if '-' in ch_n: parts = [p.split('-')[0].strip() for p in ch_n.split('-')]; ch_n = '-'.join(sorted(parts))
+            a[ch_n] = a.get(ch_n, 0) + val
+        s_ch = sorted(a.keys()); s_val = np.array([a[c] for c in s_ch])
+        return s_ch, (s_val - s_val.min())/(s_val.max()-s_val.min()) if s_val.max()>s_val.min() else s_val
+    
+    pre_ch, pre_f = agg(pre_imp)
+    inter_ch, inter_f = agg(inter_imp)
+    
+    std_pos = {'FP1':[-0.04,0.08,0.02], 'FP2':[0.04,0.08,0.02], 'F7':[-0.08,0.04,0.01], 'F3':[-0.03,0.06,0.03], 'FZ':[0,0.06,0.04], 
+               'F4':[0.03,0.06,0.03], 'F8':[0.08,0.04,0.01], 'T7':[-0.09,0,0], 'C3':[-0.04,0.02,0.05], 'CZ':[0,0.02,0.06], 
+               'C4':[0.04,0.02,0.05], 'T8':[0.09,0,0], 'P7':[-0.08,-0.04,0.02], 'P3':[-0.03,-0.04,0.04], 'PZ':[0,-0.04,0.05], 
+               'P4':[0.03,-0.04,0.04], 'P8':[0.08,-0.04,0.02], 'O1':[-0.04,-0.08,0.02], 'O2':[0.04,-0.08,0.02], 
+               'FT9':[-0.085,0.06,0.01], 'FT10':[0.085,0.06,0.01], 'A1':[-0.06,-0.02,0.0], 'A2':[0.06,-0.02,0.0]}
+    
+    ch_pos = {}
+    for ch in pre_ch:
+        cu = ch.upper()
+        if '-' in cu:
+            parts = [p.strip() for p in cu.split('-')]
+            coords = [np.array(std_pos.get(p)) for p in parts if p in std_pos]
+            if len(coords)==2: ch_pos[ch] = (coords[0]+coords[1])/2
+        elif cu in std_pos: ch_pos[ch] = np.array(std_pos[cu])
+
+    fig, axes = plt.subplots(1, 3, figsize=(20, 7))
+    
+    plot_circular_topomap(pre_ch, pre_f, ch_pos, title='Preictal (класс 1)\n🔴 Перед приступом', cmap='RdYlBu_r', ax=axes[0])
+    plot_circular_topomap(inter_ch, inter_f, ch_pos, title='Interictal (класс 0)\n🔵 Между приступами', cmap='RdYlBu_r', ax=axes[1])
+    
+    feat_names = ['Mean\n(Signal)', 'Std\n(Variability)', 'Delta\n(1-4 Hz)', 'Theta\n(4-8 Hz)', 
+                  'Alpha\n(8-13 Hz)', 'Beta\n(13-30 Hz)', 'Gamma\n(30-45 Hz)']
+    lin_layer = getattr(model.conv1, 'lin_l', None) or getattr(model.conv1, 'lin_src', None)
+    if lin_layer and hasattr(lin_layer, 'weight'):
+        raw_w = lin_layer.weight.detach().abs().mean(dim=0).cpu().numpy()
+    else: raw_w = np.ones(7)
+    
+    norm_w = raw_w / raw_w.max() if raw_w.max()>1e-8 else raw_w
+    
+    bars = axes[2].barh(range(len(feat_names)), norm_w[::-1], 
+                        color=plt.cm.viridis(np.linspace(0.2, 0.9, 7))[::-1], edgecolor='black', height=0.6)
+    
+    for bar, val, raw in zip(bars, norm_w[::-1], raw_w[::-1]):
+        axes[2].text(bar.get_width() + 0.02, bar.get_y() + bar.get_height()/2, 
+                    f'{raw:.4f}', va='center', fontsize=9, fontweight='bold')
+            
+    axes[2].set_yticks(range(len(feat_names)))
+    axes[2].set_yticklabels(feat_names[::-1], fontsize=9)
+    axes[2].set_xlabel('Нормализованный вес (Макс = 1.0)', fontsize=10)
+    axes[2].set_title('📈 Важность спектральных признаков', fontsize=12, fontweight='bold', pad=10)
+    axes[2].set_xlim(0, max(norm_w)*1.2 + 0.05)
+    axes[2].grid(axis='x', alpha=0.3, linestyle=':')
+    axes[2].spines['top'].set_visible(False); axes[2].spines['right'].set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.show()
+    print(f"💾 График сохранён: {save_path}")
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+    pd.DataFrame({'channel': pre_ch, 'preictal': pre_f, 'interictal': inter_f, 'difference': pre_f - inter_f}).to_csv(f'attention_comparison_{timestamp}.csv', index=False)
+
+    print("\n" + "🔬"*35)
+    print("📋 ЗАКЛЮЧЕНИЕ: Важность признаков и зон")
+    print("🔬"*35)
+    
+    diff = pre_f - inter_f
+    print("\n🔥 Топ-5 зон с наибольшим ростом внимания перед приступом:")
+    top_diff = sorted(zip(pre_ch, diff), key=lambda x: x[1], reverse=True)[:5]
+    for i, (ch, val) in enumerate(top_diff, 1):
+        print(f"   {i}. {ch:10s} → +{val:.4f}")
+
+    print("\n📊 Важность признаков (абсолютные значения):")
+    for n, r in zip(feat_names, raw_w[::-1]):
+        print(f"   • {n.replace(chr(10), ' '):15s} : {r:.5f}")
+
+    max_feat = feat_names[np.argmax(raw_w)].replace(chr(10), ' ')
+    print(f"\n💡 КЛЮЧЕВОЙ МАРКЕР: {max_feat} имеет наибольший вес.")
+    
+    print("\n🧠 ИНТЕРПРЕТАЦИЯ:")
+    if raw_w[2] > 0.1: print("   • Усиление дельта-ритма (1-4 Гц) указывает на локальную синхронизацию коры.")
+    if raw_w[3] > 0.1: print("   • Тета-ритм (4-8 Гц) часто связан с когнитивной нагрузкой и продромальными состояниями.")
+    
+    print("🔬"*35)
+
+if __name__ == "__main__":
+    visualize_attention_comparison(model, graph_dataset, final_ch_names, device, save_path='gat_comparison_final.png')
+    print("🎉 Конвейер завершён успешно!")
