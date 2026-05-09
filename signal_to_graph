@@ -1,0 +1,97 @@
+import numpy as np
+import torch
+from torch_geometric.data import Data
+from scipy.signal import coherence
+
+def signal_to_graph(data, sfreq=256.0, fmin=1.0, fmax=45.0, coh_threshold=0.30):
+    """
+    Преобразует многоканальный ЭЭГ-сигнал в граф на основе спектральной когерентности.
+    
+    Параметры:
+        data (np.array): сигнал, shape=(n_channels, n_times)
+        sfreq (float): частота дискретизации (Гц)
+        fmin, fmax (float): диапазон частот для анализа когерентности
+        coh_threshold (float): минимальное значение когерентности для добавления ребра
+    
+    Возвращает:
+        graph (torch_geometric.data.Data): графовое представление сигнала
+        coh_matrix (np.array): матрица когерентности (n_ch, n_ch)
+    """
+    import numpy as np
+    import torch
+    from torch_geometric.data import Data
+    from scipy.signal import coherence
+
+    n_ch, n_t = data.shape
+    nperseg = min(256, n_t)
+    noverlap = nperseg // 2
+    coh_matrix = np.zeros((n_ch, n_ch))
+
+    for i in range(n_ch):
+        for j in range(i + 1, n_ch):
+            freqs, coh_vals = coherence(
+                data[i], data[j],
+                fs=sfreq,
+                nperseg=nperseg,
+                noverlap=noverlap,
+                window='hann'
+            )
+            mask = (freqs >= fmin) & (freqs <= fmax)
+            if np.any(mask):
+                mean_coh = np.mean(coh_vals[mask])
+                coh_matrix[i, j] = coh_matrix[j, i] = mean_coh
+
+    np.fill_diagonal(coh_matrix, 0.0)
+
+    edge_index = []
+    edge_attr = []
+    for i in range(n_ch):
+        for j in range(n_ch):
+            if i != j and coh_matrix[i, j] > coh_threshold:
+                edge_index.append([i, j])
+                edge_attr.append(coh_matrix[i, j])
+
+    if edge_index:
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_attr = torch.tensor(edge_attr, dtype=torch.float).unsqueeze(1)
+    else:
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+        edge_attr = torch.empty((0, 1), dtype=torch.float)
+
+    node_features = np.stack([
+        np.mean(data, axis=1),
+        np.std(data, axis=1)
+    ], axis=1)
+    x = torch.tensor(node_features, dtype=torch.float)
+
+    graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    return graph, coh_matrix
+
+
+
+graph_dataset = []
+sfreq = 256.0
+window_sec = 30
+window_size = int(window_sec * sfreq)
+
+for data, label in zip(clean_data_list, label_list):
+    if data.shape[1] < window_size:
+        continue  # пропустить короткие записи
+    
+    # Берём последнее окно (для преиктального анализа)
+    window = data[:, -window_size:]
+    
+    try:
+        graph, _ = signal_to_graph(
+            window,
+            sfreq=sfreq,
+            fmin=1.0,
+            fmax=45.0,
+            coh_threshold=0.1
+        )
+        graph.y = torch.tensor([label], dtype=torch.long)
+        graph_dataset.append(graph)
+    except Exception as e:
+        print(f"Ошибка: {e}")
+
+print(f"✅ Создано {len(graph_dataset)} графов.")
