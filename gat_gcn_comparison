@@ -1,0 +1,489 @@
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch_geometric.loader import DataLoader
+from torch_geometric.data import Data
+from torch_geometric.nn import GATv2Conv, GCNConv, global_mean_pool
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, classification_report
+import matplotlib.pyplot as plt
+import pandas as pd
+from copy import deepcopy
+from collections import Counter
+import warnings
+warnings.filterwarnings('ignore')
+
+class GCNClassifier(torch.nn.Module):
+    """
+    Базовая модель GCN для сравнения с GAT.
+    Не использует механизм внимания и атрибуты рёбер.
+    """
+    def __init__(self, in_channels=7, hidden_channels=64, out_channels=2):
+        super().__init__()
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.classifier = torch.nn.Linear(hidden_channels, out_channels)
+        self.dropout = torch.nn.Dropout(0.2)
+
+    def forward(self, x, edge_index, edge_attr, batch):
+        # GCN не использует edge_attr
+        x = self.conv1(x, edge_index)
+        x = F.elu(x)
+        x = self.dropout(x)
+        x = self.conv2(x, edge_index)
+        x = F.elu(x)
+        x = global_mean_pool(x, batch)
+        return self.classifier(x)
+
+
+class GATClassifierImproved(torch.nn.Module):
+    """
+    Улучшенная модель GAT с механизмом внимания.
+    """
+    def __init__(self, in_channels=7, hidden_channels=64, out_channels=2, heads=4):
+        super().__init__()
+        self.conv1 = GATv2Conv(in_channels, hidden_channels, heads=heads, edge_dim=1)
+        self.conv2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=2, edge_dim=1)
+        self.classifier = torch.nn.Linear(hidden_channels * 2, out_channels)
+        self.dropout = torch.nn.Dropout(0.2)
+
+    def forward(self, x, edge_index, edge_attr, batch):
+        x = self.conv1(x, edge_index, edge_attr)
+        x = F.elu(x)
+        x = self.dropout(x)
+        x = self.conv2(x, edge_index, edge_attr)
+        x = F.elu(x)
+        x = global_mean_pool(x, batch)
+        return self.classifier(x)
+
+def train_epoch(model, train_loader, optimizer, device, class_weights=None):
+    """Одна эпоха обучения."""
+    model.train()
+    total_loss = 0
+    
+    for batch in train_loader:
+        batch = batch.to(device)
+        optimizer.zero_grad()
+        out = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+        
+        if class_weights is not None:
+            loss = F.cross_entropy(out, batch.y, weight=class_weights)
+        else:
+            loss = F.cross_entropy(out, batch.y)
+        
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    
+    return total_loss / len(train_loader)
+
+
+def evaluate_model_detailed(model, val_loader, device):
+    """Оценка модели с подробными метриками."""
+    model.eval()
+    all_preds, all_labels = [], []
+    
+    with torch.no_grad():
+        for batch in val_loader:
+            batch = batch.to(device)
+            out = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+            pred = out.argmax(dim=1)
+            all_preds.extend(pred.cpu().numpy())
+            all_labels.extend(batch.y.cpu().numpy())
+    
+    acc = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    precision = precision_score(all_labels, all_preds, average='weighted', zero_division=0)
+    recall = recall_score(all_labels, all_preds, average='weighted', zero_division=0)
+    
+    # Метрики по классам
+    report = classification_report(all_labels, all_preds, target_names=['Interictal', 'Preictal'], 
+                                   output_dict=True, zero_division=0)
+    
+    return {
+        'accuracy': acc,
+        'f1_weighted': f1,
+        'precision_weighted': precision,
+        'recall_weighted': recall,
+        'report': report,
+        'all_preds': all_preds,
+        'all_labels': all_labels
+    }
+
+
+def train_model_with_cv(model_class, graph_dataset, dataset_channel_names, common_channels, 
+                        device, class_weights, n_splits=5, max_epochs=200, model_name="Model"):
+    """
+    Обучение модели с кросс-валидацией для стабильных результатов.
+    """
+    from sklearn.model_selection import StratifiedKFold
+    
+    labels = [g.y.item() for g in graph_dataset]
+    kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    
+    cv_results = []
+    
+    print(f"\n{'='*70}")
+    print(f"🔧 ОБУЧЕНИЕ {model_name} С {n_splits}-FOLD CV")
+    print(f"{'='*70}")
+    
+    for fold, (train_idx, val_idx) in enumerate(kf.split(graph_dataset, labels)):
+        print(f"\n🔄 Fold {fold+1}/{n_splits}")
+        
+        train_ds = [graph_dataset[i] for i in train_idx]
+        val_ds = [graph_dataset[i] for i in val_idx]
+        train_ch = [dataset_channel_names[i] for i in train_idx]
+        val_ch = [dataset_channel_names[i] for i in val_idx]
+        
+        # Фильтрация по общим каналам
+        def filter_graph(graph, graph_ch_names, common_ch):
+            keep_indices = [i for i, ch in enumerate(graph_ch_names) if ch in common_ch]
+            if len(keep_indices) < 2:
+                return None, []
+            old_to_new = {old: new for new, old in enumerate(keep_indices)}
+            new_x = graph.x[keep_indices]
+            edge_mask = torch.isin(graph.edge_index[0], torch.tensor(keep_indices)) & \
+                        torch.isin(graph.edge_index[1], torch.tensor(keep_indices))
+            new_edge_index = graph.edge_index[:, edge_mask]
+            if new_edge_index.shape[1] > 0:
+                for old, new in old_to_new.items():
+                    new_edge_index[0][new_edge_index[0] == old] = new
+                    new_edge_index[1][new_edge_index[1] == old] = new
+            new_edge_attr = graph.edge_attr[edge_mask] if graph.edge_attr is not None else None
+            new_ch = [ch for ch in graph_ch_names if ch in common_ch]
+            return Data(x=new_x, edge_index=new_edge_index, edge_attr=new_edge_attr, y=graph.y), new_ch
+        
+        train_filt, train_ch_filt = [], []
+        val_filt, val_ch_filt = [], []
+        
+        for g, ch in zip(train_ds, train_ch):
+            new_g, new_ch = filter_graph(g, ch, common_channels)
+            if new_g:
+                train_filt.append(new_g)
+                train_ch_filt.append(new_ch)
+        
+        for g, ch in zip(val_ds, val_ch):
+            new_g, new_ch = filter_graph(g, ch, common_channels)
+            if new_g:
+                val_filt.append(new_g)
+                val_ch_filt.append(new_ch)
+        
+        if len(train_filt) < 10 or len(val_filt) < 5:
+            print(f"   ⚠️ Пропущен fold {fold+1}: мало данных")
+            continue
+        
+        train_loader = DataLoader(train_filt, batch_size=16, shuffle=True)
+        val_loader = DataLoader(val_filt, batch_size=16)
+        
+        # Определение количества признаков
+        n_features = train_filt[0].x.shape[1]
+        
+        # Создание модели
+        model = model_class(in_channels=n_features, hidden_channels=64, out_channels=2).to(device)
+        optimizer = optim.Adam(model.parameters(), lr=0.003, weight_decay=1e-4)
+        
+        # Обучение
+        best_val_f1 = 0
+        best_model_state = None
+        patience = 30
+        patience_counter = 0
+        
+        for epoch in range(max_epochs):
+            loss = train_epoch(model, train_loader, optimizer, device, class_weights)
+            metrics = evaluate_model_detailed(model, val_loader, device)
+            val_f1 = metrics['f1_weighted']
+            
+            if val_f1 > best_val_f1:
+                best_val_f1 = val_f1
+                best_model_state = deepcopy(model.state_dict())
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
+            if (epoch + 1) % 40 == 0:
+                print(f"   Epoch {epoch+1:03d}: Loss={loss:.4f}, F1={val_f1:.3f}")
+            
+            if patience_counter >= patience:
+                break
+        
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
+        
+        # Финальная оценка
+        final_metrics = evaluate_model_detailed(model, val_loader, device)
+        
+        cv_results.append({
+            'fold': fold + 1,
+            'accuracy': final_metrics['accuracy'],
+            'f1_weighted': final_metrics['f1_weighted'],
+            'precision_weighted': final_metrics['precision_weighted'],
+            'recall_weighted': final_metrics['recall_weighted'],
+            'f1_interictal': final_metrics['report']['Interictal']['f1-score'],
+            'f1_preictal': final_metrics['report']['Preictal']['f1-score']
+        })
+        
+        print(f"   ✅ Fold {fold+1}: Acc={final_metrics['accuracy']:.3f}, F1={final_metrics['f1_weighted']:.3f}")
+    
+    # Агрегация результатов
+    mean_results = {
+        'accuracy': np.mean([r['accuracy'] for r in cv_results]),
+        'accuracy_std': np.std([r['accuracy'] for r in cv_results]),
+        'f1_weighted': np.mean([r['f1_weighted'] for r in cv_results]),
+        'f1_weighted_std': np.std([r['f1_weighted'] for r in cv_results]),
+        'precision_weighted': np.mean([r['precision_weighted'] for r in cv_results]),
+        'recall_weighted': np.mean([r['recall_weighted'] for r in cv_results]),
+        'f1_interictal': np.mean([r['f1_interictal'] for r in cv_results]),
+        'f1_preictal': np.mean([r['f1_preictal'] for r in cv_results]),
+    }
+    
+    print(f"\n📊 {model_name} - СРЕДНИЕ РЕЗУЛЬТАТЫ CV:")
+    print(f"   Accuracy: {mean_results['accuracy']:.3f} ± {mean_results['accuracy_std']:.3f}")
+    print(f"   F1-score: {mean_results['f1_weighted']:.3f} ± {mean_results['f1_weighted_std']:.3f}")
+    print(f"   Precision: {mean_results['precision_weighted']:.3f}")
+    print(f"   Recall: {mean_results['recall_weighted']:.3f}")
+    
+    return cv_results, mean_results
+
+def plot_model_comparison(gat_results, gcn_results, save_path=None):
+    """
+    Строит сравнительные графики GAT vs GCN.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # === График 1: Основные метрики (bar plot) ===
+    ax1 = axes[0, 0]
+    metrics = ['Accuracy', 'F1-score', 'Precision', 'Recall']
+    gat_vals = [
+        gat_results['accuracy'],
+        gat_results['f1_weighted'],
+        gat_results['precision_weighted'],
+        gat_results['recall_weighted']
+    ]
+    gcn_vals = [
+        gcn_results['accuracy'],
+        gcn_results['f1_weighted'],
+        gcn_results['precision_weighted'],
+        gcn_results['recall_weighted']
+    ]
+    gat_err = [
+        gat_results['accuracy_std'],
+        gat_results['f1_weighted_std'],
+        gat_results['f1_weighted_std'],  # approximation
+        gat_results['f1_weighted_std']   # approximation
+    ]
+    gcn_err = [
+        gcn_results['accuracy_std'],
+        gcn_results['f1_weighted_std'],
+        gcn_results['f1_weighted_std'],
+        gcn_results['f1_weighted_std']
+    ]
+    
+    x = np.arange(len(metrics))
+    width = 0.35
+    
+    bars1 = ax1.bar(x - width/2, gat_vals, width, label='GAT', color='steelblue', yerr=gat_err, capsize=5)
+    bars2 = ax1.bar(x + width/2, gcn_vals, width, label='GCN', color='coral', yerr=gcn_err, capsize=5)
+    
+    ax1.set_ylabel('Значение метрики', fontsize=11)
+    ax1.set_title('Сравнение основных метрик', fontsize=12, pad=10)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(metrics, fontsize=10)
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3, axis='y', linestyle=':')
+    ax1.set_ylim(0, 1.0)
+    
+    # === График 2: F1 по классам ===
+    ax2 = axes[0, 1]
+    classes = ['Interictal\nF1', 'Preictal\nF1']
+    gat_class_vals = [gat_results['f1_interictal'], gat_results['f1_preictal']]
+    gcn_class_vals = [gcn_results['f1_interictal'], gcn_results['f1_preictal']]
+    
+    x2 = np.arange(len(classes))
+    bars3 = ax2.bar(x2 - width/2, gat_class_vals, width, label='GAT', color='steelblue')
+    bars4 = ax2.bar(x2 + width/2, gcn_class_vals, width, label='GCN', color='coral')
+    
+    ax2.set_ylabel('F1-score', fontsize=11)
+    ax2.set_title('F1-score по классам', fontsize=12, pad=10)
+    ax2.set_xticks(x2)
+    ax2.set_xticklabels(classes, fontsize=10)
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3, axis='y', linestyle=':')
+    ax2.set_ylim(0, 1.0)
+    
+    # === График 3: Распределение F1 по folds ===
+    ax3 = axes[1, 0]
+    gat_folds = [r['f1_weighted'] for r in gat_results.get('cv_results', [])]
+    gcn_folds = [r['f1_weighted'] for r in gcn_results.get('cv_results', [])]
+    
+    if len(gat_folds) > 0 and len(gcn_folds) > 0:
+        ax3.boxplot([gat_folds, gcn_folds], labels=['GAT', 'GCN'], patch_artist=True,
+                    boxprops=dict(alpha=0.7), medianprops=dict(color='black', linewidth=2))
+        ax3.set_ylabel('F1-score', fontsize=11)
+        ax3.set_title('Распределение F1 по folds кросс-валидации', fontsize=12, pad=10)
+        ax3.grid(True, alpha=0.3, axis='y', linestyle=':')
+        ax3.set_ylim(0, 1.0)
+    
+    # === График 4: Улучшение GAT над GCN (%) ===
+    ax4 = axes[1, 1]
+    improvements = {
+        'Accuracy': (gat_results['accuracy'] - gcn_results['accuracy']) / max(gcn_results['accuracy'], 0.01) * 100,
+        'F1-score': (gat_results['f1_weighted'] - gcn_results['f1_weighted']) / max(gcn_results['f1_weighted'], 0.01) * 100,
+        'Precision': (gat_results['precision_weighted'] - gcn_results['precision_weighted']) / max(gcn_results['precision_weighted'], 0.01) * 100,
+        'Recall': (gat_results['recall_weighted'] - gcn_results['recall_weighted']) / max(gcn_results['recall_weighted'], 0.01) * 100
+    }
+    
+    colors = ['green' if v > 0 else 'red' for v in improvements.values()]
+    bars5 = ax4.bar(range(len(improvements)), list(improvements.values()), color=colors, edgecolor='black')
+    ax4.set_ylabel('Улучшение GAT над GCN (%)', fontsize=11)
+    ax4.set_title('Относительное улучшение метрик', fontsize=12, pad=10)
+    ax4.set_xticks(range(len(improvements)))
+    ax4.set_xticklabels(list(improvements.keys()), fontsize=10, rotation=15)
+    ax4.axhline(y=0, color='black', linestyle='-', linewidth=1)
+    ax4.grid(True, alpha=0.3, axis='y', linestyle=':')
+    
+    # Добавление значений на столбцы
+    for i, v in enumerate(improvements.values()):
+        ax4.text(i, v + (1 if v > 0 else -3), f'{v:+.1f}%', ha='center', 
+                fontsize=9, color='darkgreen' if v > 0 else 'darkred', fontweight='bold')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f"💾 График сравнения сохранён: {save_path}")
+    
+    plt.show()
+
+def save_comparison_results(gat_results, gcn_results, save_path='gat_vs_gcn_comparison.csv'):
+    """Сохраняет результаты сравнения в CSV."""
+    
+    comparison_data = {
+        'Metric': ['Accuracy', 'F1-score (weighted)', 'Precision (weighted)', 'Recall (weighted)', 
+                   'F1 Interictal', 'F1 Preictal'],
+        'GAT (Ours)': [
+            f"{gat_results['accuracy']:.3f} ± {gat_results['accuracy_std']:.3f}",
+            f"{gat_results['f1_weighted']:.3f} ± {gat_results['f1_weighted_std']:.3f}",
+            f"{gat_results['precision_weighted']:.3f}",
+            f"{gat_results['recall_weighted']:.3f}",
+            f"{gat_results['f1_interictal']:.3f}",
+            f"{gat_results['f1_preictal']:.3f}"
+        ],
+        'GCN (Baseline)': [
+            f"{gcn_results['accuracy']:.3f} ± {gcn_results['accuracy_std']:.3f}",
+            f"{gcn_results['f1_weighted']:.3f} ± {gcn_results['f1_weighted_std']:.3f}",
+            f"{gcn_results['precision_weighted']:.3f}",
+            f"{gcn_results['recall_weighted']:.3f}",
+            f"{gcn_results['f1_interictal']:.3f}",
+            f"{gcn_results['f1_preictal']:.3f}"
+        ],
+        'Improvement (%)': [
+            f"{(gat_results['accuracy'] - gcn_results['accuracy']) / max(gcn_results['accuracy'], 0.01) * 100:+.1f}",
+            f"{(gat_results['f1_weighted'] - gcn_results['f1_weighted']) / max(gcn_results['f1_weighted'], 0.01) * 100:+.1f}",
+            f"{(gat_results['precision_weighted'] - gcn_results['precision_weighted']) / max(gcn_results['precision_weighted'], 0.01) * 100:+.1f}",
+            f"{(gat_results['recall_weighted'] - gcn_results['recall_weighted']) / max(gcn_results['recall_weighted'], 0.01) * 100:+.1f}",
+            f"{(gat_results['f1_interictal'] - gcn_results['f1_interictal']) / max(gcn_results['f1_interictal'], 0.01) * 100:+.1f}",
+            f"{(gat_results['f1_preictal'] - gcn_results['f1_preictal']) / max(gcn_results['f1_preictal'], 0.01) * 100:+.1f}"
+        ]
+    }
+    
+    df = pd.DataFrame(comparison_data)
+    df.to_csv(save_path, index=False, encoding='utf-8-sig')
+    print(f"💾 Таблица сравнения сохранена: {save_path}")
+    
+    return df
+
+
+def compare_gat_vs_gcn(graph_dataset, channel_names_list, common_channels, device, 
+                       class_weight_ratio=3.0, n_splits=5):
+    """
+    Проводит полное сравнение GAT vs GCN.
+    """
+    print("\n" + "="*70)
+    print("🔬 СРАВНЕНИЕ МОДЕЛЕЙ: GAT vs GCN")
+    print("="*70)
+    
+    # Подготовка весов классов
+    labels = [g.y.item() for g in graph_dataset]
+    label_counts = Counter(labels)
+    class_weights = torch.tensor([1.0, class_weight_ratio], dtype=torch.float).to(device)
+    
+    print(f"⚖️ Веса классов: Interictal=1.00, Preictal={class_weight_ratio:.1f}")
+    print(f"📊 Распределение: Interictal={label_counts[0]}, Preictal={label_counts[1]}")
+    
+    
+    gat_cv_results, gat_mean_results = train_model_with_cv(
+        GATClassifierImproved, graph_dataset, channel_names_list, common_channels,
+        device, class_weights, n_splits=n_splits, max_epochs=200, model_name="GAT"
+    )
+    gat_mean_results['cv_results'] = gat_cv_results
+    
+    gcn_cv_results, gcn_mean_results = train_model_with_cv(
+        GCNClassifier, graph_dataset, channel_names_list, common_channels,
+        device, class_weights, n_splits=n_splits, max_epochs=200, model_name="GCN"
+    )
+    gcn_mean_results['cv_results'] = gcn_cv_results
+    
+    plot_model_comparison(gat_mean_results, gcn_mean_results, save_path='gat_vs_gcn_comparison.png')
+    
+    comparison_df = save_comparison_results(gat_mean_results, gcn_mean_results)
+    
+    print("\n" + "🎓"*35)
+    print("РЕЗУЛЬТАТЫ СРАВНЕНИЯ GAT vs GCN")
+    print("🎓"*35)
+    print(f"📊 Кросс-валидация: {n_splits}-fold")
+    print(f"📁 Всего графов: {len(graph_dataset)}")
+    print(f"🎯 Каналов: {len(common_channels)}")
+    print("\n📈 СРАВНЕНИЕ МЕТРИК:")
+    print(f"{'Метрика':<25} {'GAT':<20} {'GCN':<20} {'Улучшение':<15}")
+    print("-"*80)
+    print(f"{'Accuracy':<25} {gat_mean_results['accuracy']:.3f} ± {gat_mean_results['accuracy_std']:.3f}  {gcn_mean_results['accuracy']:.3f} ± {gcn_mean_results['accuracy_std']:.3f}  {(gat_mean_results['accuracy'] - gcn_mean_results['accuracy'])*100:+.1f}%")
+    print(f"{'F1-score (weighted)':<25} {gat_mean_results['f1_weighted']:.3f} ± {gat_mean_results['f1_weighted_std']:.3f}  {gcn_mean_results['f1_weighted']:.3f} ± {gcn_mean_results['f1_weighted_std']:.3f}  {(gat_mean_results['f1_weighted'] - gcn_mean_results['f1_weighted'])*100:+.1f}%")
+    print(f"{'F1 Interictal':<25} {gat_mean_results['f1_interictal']:.3f}  {gcn_mean_results['f1_interictal']:.3f}  {(gat_mean_results['f1_interictal'] - gcn_mean_results['f1_interictal'])*100:+.1f}%")
+    print(f"{'F1 Preictal':<25} {gat_mean_results['f1_preictal']:.3f}  {gcn_mean_results['f1_preictal']:.3f}  {(gat_mean_results['f1_preictal'] - gcn_mean_results['f1_preictal'])*100:+.1f}%")
+    print("🎓"*35)
+    
+    # === Статистическая значимость (t-test) ===
+    from scipy import stats
+    gat_f1s = [r['f1_weighted'] for r in gat_cv_results]
+    gcn_f1s = [r['f1_weighted'] for r in gcn_cv_results]
+    
+    if len(gat_f1s) > 1 and len(gcn_f1s) > 1:
+        t_stat, p_value = stats.ttest_ind(gat_f1s, gcn_f1s)
+        print(f"\n📊 СТАТИСТИЧЕСКАЯ ПРОВЕРКА (t-test):")
+        print(f"   t-statistic: {t_stat:.3f}")
+        print(f"   p-value: {p_value:.4f}")
+        if p_value < 0.05:
+            print(f"   ✅ Различие статистически значимо (p < 0.05)")
+        else:
+            print(f"   ⚠️ Различие не статистически значимо (p >= 0.05)")
+    
+    print("\n💾 Результаты сохранены:")
+    print("   • gat_vs_gcn_comparison.png (график)")
+    print("   • gat_vs_gcn_comparison.csv (таблица)")
+    
+    return gat_mean_results, gcn_mean_results, comparison_df
+
+
+if __name__ == "__main__":
+    # Проверка наличия данных
+    required_vars = ['graph_dataset', 'channel_names_list_new', 'common_channels']
+    for var in required_vars:
+        if var not in globals():
+            raise NameError(f"Убедитесь, что {var} определён!")
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"🖥️ Устройство: {device}")
+    print(f"📁 Всего графов: {len(graph_dataset)}")
+    print(f"📡 Каналов: {len(common_channels)}")
+    
+    gat_results, gcn_results, comparison_df = compare_gat_vs_gcn(
+        graph_dataset=graph_dataset,
+        channel_names_list=channel_names_list_new,
+        common_channels=common_channels,
+        device=device,
+        class_weight_ratio=3.0,
+        n_splits=5  # 5-fold кросс-валидация
+    )
+    
+    print("\n🎉 Сравнение завершено!")
