@@ -1,0 +1,711 @@
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch_geometric.loader import DataLoader
+from torch_geometric.data import Data
+from torch_geometric.nn import GATv2Conv, global_mean_pool
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, classification_report
+import matplotlib.pyplot as plt
+from copy import deepcopy
+from collections import Counter
+import pandas as pd
+import warnings
+warnings.filterwarnings('ignore')
+
+def signal_to_graph_spectral(data, sfreq=256.0, fmin=1.0, fmax=45.0, coh_threshold=0.1):
+    """
+    Создаёт граф с 7 признаками на узел (mean, std + 5 частотных полос).
+    """
+    from scipy.signal import coherence, welch
+    
+    n_ch, n_t = data.shape
+    
+    # === Базовые признаки (2) ===
+    mean_vals = np.mean(data, axis=1, keepdims=True)
+    std_vals = np.std(data, axis=1, keepdims=True)
+    
+    # === Спектральные признаки (5) ===
+    bands = {
+        'delta': (1, 4),
+        'theta': (4, 8),
+        'alpha': (8, 13),
+        'beta': (13, 30),
+        'gamma': (30, 45)
+    }
+    
+    spectral_features = []
+    for ch_data in data:  # 🔥 ИСПРАВЛЕНО: было "for ch_data in"
+        freqs, psd = welch(ch_data, fs=sfreq, nperseg=min(256, n_t), nfft=512)
+        band_powers = []
+        for band_name, (f_low, f_high) in bands.items():
+            mask = (freqs >= f_low) & (freqs <= f_high)
+            if np.any(mask):
+                band_powers.append(np.mean(psd[mask]))
+            else:
+                band_powers.append(0.0)
+        spectral_features.append(band_powers)
+    
+    spectral_features = np.array(spectral_features)  # [n_ch, 5]
+    
+    # === Нормализация спектральных признаков ===
+    spec_mean = spectral_features.mean(axis=0)
+    spec_std = spectral_features.std(axis=0) + 1e-8
+    spectral_features = (spectral_features - spec_mean) / spec_std
+    
+    # === Объединяем все признаки (7 всего) ===
+    node_features = np.hstack([mean_vals, std_vals, spectral_features])
+    x = torch.tensor(node_features, dtype=torch.float)
+    
+    # === Когерентность для рёбер ===
+    nperseg = min(256, n_t)
+    noverlap = nperseg // 2
+    coh_matrix = np.zeros((n_ch, n_ch))
+    
+    for i in range(n_ch):
+        for j in range(i + 1, n_ch):
+            freqs, coh_vals = coherence(
+                data[i], data[j],
+                fs=sfreq,
+                nperseg=nperseg,
+                noverlap=noverlap,
+                window='hann'
+            )
+            mask = (freqs >= fmin) & (freqs <= fmax)
+            if np.any(mask):
+                mean_coh = np.mean(coh_vals[mask])
+                coh_matrix[i, j] = coh_matrix[j, i] = mean_coh
+    
+    np.fill_diagonal(coh_matrix, 0.0)
+    
+    # === Построение edge_index и edge_attr ===
+    edge_index = []
+    edge_attr = []
+    for i in range(n_ch):
+        for j in range(n_ch):
+            if i != j and coh_matrix[i, j] > coh_threshold:
+                edge_index.append([i, j])
+                edge_attr.append(coh_matrix[i, j])
+    
+    if edge_index:
+        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+        edge_attr = torch.tensor(edge_attr, dtype=torch.float).unsqueeze(1)
+    else:
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+        edge_attr = torch.empty((0, 1), dtype=torch.float)
+    
+    graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    return graph, coh_matrix
+
+
+def rebuild_graph_dataset_spectral(clean_data_list, label_list, channel_names_list, sfreq=256, coh_threshold=0.1):
+    """
+    Пересоздаёт весь датасет со спектральными признаками.
+    """
+    print("🔄 Пересоздание графов со спектральными признаками (7 признаков на узел)...")
+    
+    new_dataset = []
+    new_labels = []
+    new_ch_names = []
+    
+    for i, (data, label, ch_names) in enumerate(zip(clean_data_list, label_list, channel_names_list)):
+        try:
+            graph, _ = signal_to_graph_spectral(data, sfreq=sfreq, coh_threshold=coh_threshold)
+            graph.y = torch.tensor([label], dtype=torch.long)
+            
+            if graph.edge_index.shape[1] > 0 and graph.num_nodes >= 2:
+                new_dataset.append(graph)
+                new_labels.append(label)
+                new_ch_names.append(ch_names)
+        except Exception as e:
+            print(f"  ⚠️ Ошибка на графе {i}: {e}")
+            continue
+    
+    label_counts = Counter(new_labels)
+    print(f"✅ Создано {len(new_dataset)} графов")
+    print(f"   Класс 0 (Interictal): {label_counts[0]}")
+    print(f"   Класс 1 (Preictal): {label_counts[1]}")
+    
+    return new_dataset, new_ch_names
+
+
+def plot_channel_selection_results(results, importance_map, save_path=None):
+    """Строит два графика: метрики vs каналы + важность каналов."""
+    if len(results) == 0:
+        print("⚠️ Нет данных для визуализации!")
+        return
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # График 1: Метрики vs число каналов
+    ax1 = axes[0]
+    n_channels = [r['n_channels'] for r in results]
+    f1_scores = [r['f1'] for r in results]
+    acc_scores = [r['accuracy'] for r in results]
+    
+    ax1.plot(n_channels, f1_scores, 'bo-', linewidth=2, markersize=6, label='F1-score')
+    ax1.plot(n_channels, acc_scores, 'rs--', linewidth=2, markersize=6, label='Accuracy')
+    
+    ax1.set_xlabel('Количество каналов', fontsize=11)
+    ax1.set_ylabel('Метрика качества', fontsize=11)
+    ax1.set_title('Зависимость качества от числа каналов', fontsize=12, pad=10)
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3, linestyle=':')
+    ax1.invert_xaxis()
+    
+    best_result = max(results, key=lambda x: x['f1'] / max(x['n_channels'], 1))
+    ax1.axvline(best_result['n_channels'], color='green', linestyle=':', linewidth=2, 
+                label=f"{best_result['n_channels']} кан.")
+    ax1.legend(fontsize=9)
+    
+    # График 2: Важность каналов
+    ax2 = axes[1]
+    sorted_imp = sorted(importance_map.items(), key=lambda x: x[1], reverse=True)
+    channels = [item[0] for item in sorted_imp]
+    values = [item[1] for item in sorted_imp]
+    
+    best_channels = set(best_result['selected_channels'])
+    colors = ['gold' if ch in best_channels else 'lightgray' for ch in channels]
+    
+    y_pos = np.arange(len(channels))
+    ax2.barh(y_pos, values, color=colors, edgecolor='gray', linewidth=0.5)
+    
+    ax2.set_yticks(y_pos)
+    ax2.set_yticklabels(channels, fontsize=8)
+    ax2.set_xlabel('Важность (Attention Score)', fontsize=11)
+    ax2.set_title('Важность каналов', fontsize=12, pad=10)
+    ax2.invert_yaxis()
+    ax2.grid(True, alpha=0.3, axis='x', linestyle=':')
+    
+    for i, (ch, val) in enumerate(sorted_imp[:10]):
+        if val > 0:
+            ax2.text(val + 0.01, i, f'{val:.3f}', va='center', fontsize=7, color='darkblue')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        try:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
+            print(f"💾 График сохранён: {save_path}")
+        except Exception as e:
+            print(f"⚠️ Не удалось сохранить график: {e}")
+    
+    plt.show()
+
+
+def find_common_channels(dataset_channel_names, min_frequency=0.95):
+    """Находит каналы, присутствующие в заданной доле графов."""
+    channel_counts = Counter(ch for ch_list in dataset_channel_names for ch in ch_list)
+    n_graphs = len(dataset_channel_names)
+    threshold = min_frequency * n_graphs
+    common_channels = [ch for ch, count in channel_counts.items() if count >= threshold]
+    
+    print(f"📊 Статистика каналов:")
+    print(f"   Всего уникальных каналов: {len(channel_counts)}")
+    print(f"   Каналов во всех графах (100%): {sum(1 for c in channel_counts if channel_counts[c] == n_graphs)}")
+    print(f"   Каналов в >= 90% графов: {sum(1 for c in channel_counts if channel_counts[c] >= 0.9 * n_graphs)}")
+    print(f"   Выбрано каналов (порог {min_frequency*100:.0f}%): {len(common_channels)}")
+    
+    most_common = channel_counts.most_common(10)
+    print(f"\n🔝 Топ-10 самых частых каналов:")
+    for ch, cnt in most_common:
+        print(f"   {ch}: {cnt}/{n_graphs} ({100*cnt/n_graphs:.1f}%)")
+    
+    return sorted(common_channels)
+
+
+def filter_graph_to_common_channels(graph, graph_channel_names, common_channels):
+    """Оставляет в графе только каналы из common_channels."""
+    keep_indices = [i for i, ch in enumerate(graph_channel_names) if ch in common_channels]
+    
+    if len(keep_indices) < 2:
+        return None, []
+    
+    old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(keep_indices)}
+    new_x = graph.x[keep_indices]
+    
+    edge_mask = torch.isin(graph.edge_index[0], torch.tensor(keep_indices)) & \
+                torch.isin(graph.edge_index[1], torch.tensor(keep_indices))
+    new_edge_index = graph.edge_index[:, edge_mask]
+    
+    if new_edge_index.shape[1] > 0:
+        for old_idx, new_idx in old_to_new.items():
+            new_edge_index[0][new_edge_index[0] == old_idx] = new_idx
+            new_edge_index[1][new_edge_index[1] == old_idx] = new_idx
+    
+    new_edge_attr = graph.edge_attr[edge_mask] if graph.edge_attr is not None else None
+    new_ch_names = [ch for ch in graph_channel_names if ch in common_channels]
+    
+    return Data(x=new_x, edge_index=new_edge_index, edge_attr=new_edge_attr, y=graph.y), new_ch_names
+
+
+def filter_dataset_to_common_channels(dataset, dataset_channel_names, common_channels):
+    """Фильтрует весь датасет, оставляя только общие каналы."""
+    filtered, filtered_names = [], []
+    for graph, ch_names in zip(dataset, dataset_channel_names):
+        new_g, new_ch = filter_graph_to_common_channels(graph, ch_names, common_channels)
+        if new_g is not None:
+            filtered.append(new_g)
+            filtered_names.append(new_ch)
+    print(f"✅ Отфильтровано: {len(filtered)}/{len(dataset)} графов сохранено")
+    return filtered, filtered_names
+
+
+def filter_dataset_by_channels_list(dataset, dataset_ch_names, selected_channels):
+    """Фильтрация датасета по произвольному списку каналов."""
+    filtered, filtered_names = [], []
+    for graph, ch_names in zip(dataset, dataset_ch_names):
+        keep_idx = [i for i, ch in enumerate(ch_names) if ch in selected_channels]
+        if len(keep_idx) >= 2:
+            new_g = filter_graph_by_channels_simple(graph, keep_idx)
+            if new_g:
+                filtered.append(new_g)
+                filtered_names.append([ch_names[i] for i in keep_idx])
+    return filtered, filtered_names
+
+
+def filter_graph_by_channels_simple(graph, keep_indices):
+    """Простая фильтрация графа по индексам."""
+    old_to_new = {old: new for new, old in enumerate(keep_indices)}
+    new_x = graph.x[keep_indices]
+    
+    edge_mask = torch.isin(graph.edge_index[0], torch.tensor(keep_indices)) & \
+                torch.isin(graph.edge_index[1], torch.tensor(keep_indices))
+    new_edge_index = graph.edge_index[:, edge_mask]
+    
+    if new_edge_index.shape[1] > 0:
+        for old, new in old_to_new.items():
+            new_edge_index[0][new_edge_index[0] == old] = new
+            new_edge_index[1][new_edge_index[1] == old] = new
+    
+    new_edge_attr = graph.edge_attr[edge_mask] if graph.edge_attr is not None else None
+    return Data(x=new_x, edge_index=new_edge_index, edge_attr=new_edge_attr, y=graph.y)
+
+
+def diagnose_dataset(graph_dataset, dataset_channel_names):
+    """Печатает статистику датасета."""
+    print("\n" + "="*70)
+    print("🔍 ДИАГНОСТИКА ДАТАСЕТА")
+    print("="*70)
+    
+    labels = [g.y.item() for g in graph_dataset]
+    label_counts = Counter(labels)
+    print(f"📋 Распределение меток: {dict(label_counts)}")
+    print(f"   Доля класса 1 (preictal): {label_counts[1]/len(labels)*100:.1f}%")
+    
+    n_channels_per_graph = [len(ch) for ch in dataset_channel_names]
+    print(f"\n📡 Каналы на граф: min={min(n_channels_per_graph)}, max={max(n_channels_per_graph)}, mean={np.mean(n_channels_per_graph):.1f}")
+    
+    n_edges_per_graph = [g.edge_index.shape[1] for g in graph_dataset]
+    print(f"🔗 Рёбра на граф: min={min(n_edges_per_graph)}, max={max(n_edges_per_graph)}, mean={np.mean(n_edges_per_graph):.1f}")
+    
+    # Проверка признаков
+    if len(graph_dataset) > 0:
+        n_features = graph_dataset[0].x.shape[1]
+        print(f"🎯 Признаков на узел: {n_features}")
+    
+    empty_graphs = sum(1 for g in graph_dataset if g.edge_index.shape[1] == 0)
+    if empty_graphs > 0:
+        print(f"⚠️ Пустых графов (без рёбер): {empty_graphs}")
+    print("="*70)
+
+
+def train_epoch_balanced(model, train_loader, optimizer, device, class_weights=None):
+    """Обучение с учётом весов классов."""
+    model.train()
+    total_loss = 0
+    
+    for batch in train_loader:
+        batch = batch.to(device)
+        optimizer.zero_grad()
+        out = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+        
+        if class_weights is not None:
+            loss = F.cross_entropy(out, batch.y, weight=class_weights)
+        else:
+            loss = F.cross_entropy(out, batch.y)
+        
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    
+    return total_loss / len(train_loader)
+
+
+def evaluate_model(model, val_loader, device):
+    """Оценка модели на валидации."""
+    model.eval()
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for batch in val_loader:
+            batch = batch.to(device)
+            out = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+            pred = out.argmax(dim=1)
+            all_preds.extend(pred.cpu().numpy())
+            all_labels.extend(batch.y.cpu().numpy())
+    
+    acc = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
+    return acc, f1
+
+
+def extract_channel_importance(model, dataset, dataset_ch_names, device, channel_universe):
+    """Извлечение весов внимания для интерпретации."""
+    model.eval()
+    importance_sums = {ch: 0.0 for ch in channel_universe}
+    importance_counts = {ch: 0 for ch in channel_universe}
+    
+    with torch.no_grad():
+        for graph, ch_names in zip(dataset, dataset_ch_names):
+            if graph.edge_index.shape[1] == 0 or graph.num_nodes < 2:
+                continue
+            graph = graph.to(device)
+            try:
+                _, att_weights = model.conv1(
+                    graph.x, graph.edge_index, graph.edge_attr,
+                    return_attention_weights=True
+                )
+                att_edge_index, alpha = att_weights
+                edge_imp = alpha.mean(dim=1).cpu().numpy()
+                
+                local_imp = np.zeros(graph.num_nodes)
+                for i, (src, dst) in enumerate(att_edge_index.cpu().numpy().T):
+                    local_imp[src] += edge_imp[i]
+                    local_imp[dst] += edge_imp[i]
+                
+                for i in range(min(len(ch_names), graph.num_nodes)):
+                    ch = ch_names[i]
+                    if ch in importance_sums:
+                        importance_sums[ch] += local_imp[i]
+                        importance_counts[ch] += 1
+            except:
+                continue
+    
+    importance_map = {
+        ch: (importance_sums[ch] / importance_counts[ch] if importance_counts[ch] > 0 else 0.0)
+        for ch in channel_universe
+    }
+    
+    ranked = sorted(importance_map.items(), key=lambda x: x[1], reverse=True)
+    return [ch for ch, _ in ranked], importance_map
+
+
+class GATClassifierImproved(torch.nn.Module):
+    """
+    Улучшенная модель GAT с 7 входными признаками и увеличенной ёмкостью.
+    """
+    def __init__(self, in_channels=7, hidden_channels=64, out_channels=2, heads=4):
+        super().__init__()
+        self.conv1 = GATv2Conv(in_channels, hidden_channels, heads=heads, edge_dim=1)
+        self.conv2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=2, edge_dim=1)
+        
+        self.classifier = torch.nn.Linear(hidden_channels * 2, out_channels)  # 128 → 2
+        self.dropout = torch.nn.Dropout(0.4)
+
+    def forward(self, x, edge_index, edge_attr, batch):
+        x = self.conv1(x, edge_index, edge_attr)
+        x = F.elu(x)
+        x = self.dropout(x)
+        x = self.conv2(x, edge_index, edge_attr)
+        x = F.elu(x)
+        x = global_mean_pool(x, batch)
+        return self.classifier(x)
+
+
+def iterative_selection_common_channels(
+    graph_dataset,
+    dataset_channel_names,
+    device,
+    min_frequency=0.95,
+    min_channels=5,
+    max_epochs=100,
+    accuracy_threshold=0.90,
+    class_weight_ratio=1.8,
+    verbose=True
+):
+    """Итеративный отбор каналов с улучшенной моделью."""
+    
+    diagnose_dataset(graph_dataset, dataset_channel_names)
+    
+    if verbose:
+        print(f"\n🎯 Поиск каналов, присутствующих в {min_frequency*100:.0f}% графов...")
+    
+    common_channels = find_common_channels(dataset_channel_names, min_frequency=min_frequency)
+    
+    if len(common_channels) < min_channels + 2:
+        raise ValueError(f"Слишком мало общих каналов ({len(common_channels)}).")
+    
+    if verbose:
+        print(f"\n🔄 Фильтрация датасета до {len(common_channels)} общих каналов...")
+    
+    filtered_dataset, filtered_ch_names = filter_dataset_to_common_channels(
+        graph_dataset, dataset_channel_names, common_channels
+    )
+    
+    if len(filtered_dataset) < 20:
+        raise ValueError("Слишком мало графов после фильтрации!")
+    
+
+    labels = [g.y.item() for g in filtered_dataset]
+    label_counts = Counter(labels)
+    
+    class_weights = None
+    if len(label_counts) == 2:
+        class_weights = torch.tensor([1.0, class_weight_ratio], dtype=torch.float).to(device)
+        if verbose:
+            print(f"\n⚖️ Веса классов: Interictal={class_weights[0].item():.2f}, Preictal={class_weights[1].item():.2f}")
+            print(f"   Распределение: Interictal={label_counts[0]}, Preictal={label_counts[1]}")
+    
+  
+    if verbose:
+        print("\n" + "="*70)
+        print("🔧 ЭТАП 1: Обучение на полном наборе общих каналов")
+        print("="*70)
+    
+    train_ds, val_ds, train_ch, val_ch = train_test_split(
+        filtered_dataset, filtered_ch_names,
+        test_size=0.2, random_state=42, stratify=labels
+    )
+    
+    train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=16)
+    
+    n_features = train_ds[0].x.shape[1]
+    model = GATClassifierImproved(in_channels=n_features, hidden_channels=64, out_channels=2).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+    
+    best_val_f1 = 0
+    best_model_state = None
+    patience = 20
+    patience_counter = 0
+    
+    for epoch in range(max_epochs):
+        loss = train_epoch_balanced(model, train_loader, optimizer, device, class_weights)
+        val_acc, val_f1 = evaluate_model(model, val_loader, device)
+        
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            best_model_state = deepcopy(model.state_dict())
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        if verbose and (epoch + 1) % 10 == 0:
+            print(f"  Epoch {epoch+1:02d}: Loss={loss:.4f}, Val Acc={val_acc:.3f}, F1={val_f1:.3f}")
+        
+        if patience_counter >= patience:
+            if verbose:
+                print(f"  ⏹️ Early stopping на эпохе {epoch+1}")
+            break
+    
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    
+    full_acc, full_f1 = evaluate_model(model, val_loader, device)
+    
+    if verbose:
+        print(f"\n✅ Полный набор ({len(common_channels)} каналов): Acc={full_acc:.3f}, F1={full_f1:.3f}")
+        print("\n📋 Classification Report (валидация):")
+        model.eval()
+        all_preds, all_labels = [], []
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = batch.to(device)
+                out = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+                pred = out.argmax(dim=1)
+                all_preds.extend(pred.cpu().numpy())
+                all_labels.extend(batch.y.cpu().numpy())
+        print(classification_report(all_labels, all_preds, target_names=['Interictal', 'Preictal'], zero_division=0))
+    
+    results = [{
+        'n_channels': len(common_channels),
+        'accuracy': full_acc,
+        'f1': full_f1,
+        'selected_channels': list(common_channels)
+    }]
+    
+    if verbose:
+        print("\n🔍 Извлечение весов внимания...")
+    
+    ranked_channels, importance_map = extract_channel_importance(
+        model, val_ds, val_ch, device, common_channels
+    )
+    
+    if verbose:
+        print(f"📊 Топ-5 важных: {ranked_channels[:5]}")
+        print(f"📉 Худшие 5: {ranked_channels[-5:]}")
+    
+    if verbose:
+        print("\n" + "="*70)
+        print("🔁 ЭТАП 2: Итеративный отбор")
+        print("="*70)
+    
+    current_channels = set(common_channels)
+    threshold_f1 = full_f1 * accuracy_threshold
+    
+    iteration = 0
+    while len(current_channels) > min_channels:
+        iteration += 1
+        
+        candidates = [ch for ch in ranked_channels if ch in current_channels]
+        if len(candidates) == 0:
+            break
+        
+        least_important = candidates[-1]
+        current_channels.remove(least_important)
+        selected_list = list(current_channels)
+        
+        if verbose:
+            print(f"\n📍 Итерация {iteration}: {len(selected_list)} каналов")
+            print(f"   ✂️ Удалён: {least_important}")
+        
+        train_filt, train_ch_filt = filter_dataset_by_channels_list(train_ds, train_ch, selected_list)
+        val_filt, val_ch_filt = filter_dataset_by_channels_list(val_ds, val_ch, selected_list)
+        
+        if len(train_filt) < 8 or len(val_filt) < 4:
+            if verbose:
+                print("   ⚠️ Мало данных, стоп.")
+            break
+        
+        train_loader = DataLoader(train_filt, batch_size=16, shuffle=True)
+        val_loader = DataLoader(val_filt, batch_size=16)
+        
+        model = GATClassifierImproved(in_channels=n_features, hidden_channels=64, out_channels=2).to(device)
+        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+        
+        best_val_f1_iter = 0
+        best_model_state_iter = None
+        for epoch in range(max_epochs // 2):
+            loss = train_epoch_balanced(model, train_loader, optimizer, device, class_weights)
+            val_acc, val_f1 = evaluate_model(model, val_loader, device)
+            if val_f1 > best_val_f1_iter:
+                best_val_f1_iter = val_f1
+                best_model_state_iter = deepcopy(model.state_dict())
+        
+        if best_model_state_iter:
+            model.load_state_dict(best_model_state_iter)
+        
+        val_acc, val_f1 = evaluate_model(model, val_loader, device)
+        
+        if verbose:
+            print(f"   📈 Acc={val_acc:.3f}, F1={val_f1:.3f} | Порог: {threshold_f1:.3f}")
+        
+        results.append({
+            'n_channels': len(selected_list),
+            'accuracy': val_acc,
+            'f1': val_f1,
+            'selected_channels': selected_list,
+            'removed_channel': least_important
+        })
+        
+        if val_f1 < threshold_f1:
+            if verbose:
+                print(f"   ⚠️ Ниже порога, стоп.")
+            break
+    
+
+    best_result = max(results, key=lambda x: x['f1'] / max(x['n_channels'], 1))
+    
+    if verbose:
+        print("\n" + "="*70)
+        print("🏆 ИТОГ")
+        print("="*70)
+        print(f"✅ Лучший: {best_result['n_channels']} каналов, F1={best_result['f1']:.3f}")
+        print(f"📉 Сокращение: {len(common_channels) - best_result['n_channels']} каналов "
+              f"({100*(len(common_channels) - best_result['n_channels'])/len(common_channels):.1f}%)")
+        print(f"🎯 Отобранные: {best_result['selected_channels']}")
+    
+    return results, best_result, importance_map, common_channels
+
+
+if __name__ == "__main__":
+    # Проверка наличия данных
+    if 'clean_data_list' not in globals() or 'label_list' not in globals() or 'channel_names_list' not in globals():
+        raise NameError("Убедитесь, что clean_data_list, label_list и channel_names_list определены!")
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"🖥️ Устройство: {device}")
+    
+
+    print("\n" + "="*70)
+    print("🔧 ПОДГОТОВКА ДАННЫХ СО СПЕКТРАЛЬНЫМИ ПРИЗНАКАМИ")
+    print("="*70)
+    
+    graph_dataset, channel_names_list_new = rebuild_graph_dataset_spectral(
+        clean_data_list, label_list, channel_names_list, sfreq=256, coh_threshold=0.1
+    )
+    
+    print("\n🔍 Поиск оптимального порога частоты каналов...")
+    
+    best_frequency = 0.95
+    best_n_channels = 0
+    
+    for freq in [1.0, 0.95, 0.90, 0.85, 0.80]:
+        channel_counts = Counter(ch for ch_list in channel_names_list_new for ch in ch_list)
+        n_graphs = len(channel_names_list_new)
+        threshold = freq * n_graphs
+        n_common = sum(1 for c in channel_counts if channel_counts[c] >= threshold)
+        print(f"   Порог {freq*100:.0f}%: {n_common} каналов")
+        
+        if n_common >= 10 and best_n_channels == 0:
+            best_frequency = freq
+            best_n_channels = n_common
+            break
+    
+    if best_n_channels == 0:
+        best_frequency = 0.8
+        print(f"⚠️ Используем порог 80% как последний вариант")
+    else:
+        print(f"\n✅ Выбран порог: {best_frequency*100:.0f}% ({best_n_channels} каналов)")
+    
+    # === ЗАПУСК ОСНОВНОЙ ФУНКЦИИ ===
+    results, best_result, importance_map, common_channels = iterative_selection_common_channels(
+        graph_dataset=graph_dataset,
+        dataset_channel_names=channel_names_list_new,
+        device=device,
+        min_frequency=best_frequency,
+        min_channels=5,
+        max_epochs=100,
+        accuracy_threshold=0.90,
+        class_weight_ratio=1.8,
+        verbose=True
+    )
+    
+
+    plot_channel_selection_results(results, importance_map, save_path='channel_selection_improved.png')
+    pd.DataFrame(results).to_csv('channel_selection_improved.csv', index=False, encoding='utf-8-sig')
+    
+
+    print("\n" + "🎓"*35)
+    print("РЕЗУЛЬТАТЫ ОТБОРА КАНАЛОВ (УЛУЧШЕННАЯ МОДЕЛЬ)")
+    print("🎓"*35)
+    print(f"📊 Всего графов: {len(graph_dataset)}")
+    print(f"🎯 Признаков на узел: 7 (mean, std + 5 частотных полос)")
+    print(f"🎯 Порог включения: {best_frequency*100:.0f}% графов")
+    print(f"✅ Исходно общих каналов: {len(common_channels)}")
+    print(f"✂️ После отбора: {best_result['n_channels']}")
+    print(f"💰 Экономия: {100*(len(common_channels)-best_result['n_channels'])/len(common_channels):.1f}%")
+    print(f"📈 F1-score: {best_result['f1']:.3f}")
+    print(f"📉 Accuracy: {best_result['accuracy']:.3f}")
+    print(f"\n🔌 Отобранные каналы ({best_result['n_channels']}):")
+    for i, ch in enumerate(best_result['selected_channels'], 1):
+        print(f"   {i:2d}. {ch}")
+    print("🎓"*35)
+    
+ 
+    with open('selected_channels_improved.txt', 'w', encoding='utf-8') as f:
+        f.write("Отобранные каналы ЭЭГ (улучшенная модель со спектральными признаками)\n")
+        f.write(f"Количество: {best_result['n_channels']}\n")
+        f.write(f"F1-score: {best_result['f1']:.3f}\n")
+        f.write(f"Accuracy: {best_result['accuracy']:.3f}\n")
+        f.write(f"Сокращение: {100*(len(common_channels)-best_result['n_channels'])/len(common_channels):.1f}%\n\n")
+        f.write("Список каналов:\n")
+        for ch in best_result['selected_channels']:
+            f.write(f"{ch}\n")
+    
+    print("\n💾 Результаты сохранены:")
+    print("   • channel_selection_improved.png (график)")
+    print("   • channel_selection_improved.csv (таблица)")
+    print("   • selected_channels_improved.txt (список каналов)")
+    print("\n🎉 Готово!")
