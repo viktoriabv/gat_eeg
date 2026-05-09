@@ -5,7 +5,7 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data
 from torch_geometric.nn import GATv2Conv, global_mean_pool
 import torch.optim as optim
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 import matplotlib.pyplot as plt
 from copy import deepcopy
@@ -21,12 +21,11 @@ def signal_to_graph_spectral(data, sfreq=256.0, fmin=1.0, fmax=45.0, coh_thresho
     from scipy.signal import coherence, welch
     
     n_ch, n_t = data.shape
-    
-    # === Базовые признаки (2) ===
+
     mean_vals = np.mean(data, axis=1, keepdims=True)
     std_vals = np.std(data, axis=1, keepdims=True)
     
-    # === Спектральные признаки (5) ===
+
     bands = {
         'delta': (1, 4),
         'theta': (4, 8),
@@ -36,7 +35,7 @@ def signal_to_graph_spectral(data, sfreq=256.0, fmin=1.0, fmax=45.0, coh_thresho
     }
     
     spectral_features = []
-    for ch_data in data:  # 🔥 ИСПРАВЛЕНО: было "for ch_data in"
+    for ch_data in data:  
         freqs, psd = welch(ch_data, fs=sfreq, nperseg=min(256, n_t), nfft=512)
         band_powers = []
         for band_name, (f_low, f_high) in bands.items():
@@ -47,18 +46,15 @@ def signal_to_graph_spectral(data, sfreq=256.0, fmin=1.0, fmax=45.0, coh_thresho
                 band_powers.append(0.0)
         spectral_features.append(band_powers)
     
-    spectral_features = np.array(spectral_features)  # [n_ch, 5]
-    
-    # === Нормализация спектральных признаков ===
+    spectral_features = np.array(spectral_features)  
     spec_mean = spectral_features.mean(axis=0)
     spec_std = spectral_features.std(axis=0) + 1e-8
     spectral_features = (spectral_features - spec_mean) / spec_std
     
-    # === Объединяем все признаки (7 всего) ===
+ 
     node_features = np.hstack([mean_vals, std_vals, spectral_features])
     x = torch.tensor(node_features, dtype=torch.float)
-    
-    # === Когерентность для рёбер ===
+
     nperseg = min(256, n_t)
     noverlap = nperseg // 2
     coh_matrix = np.zeros((n_ch, n_ch))
@@ -79,7 +75,6 @@ def signal_to_graph_spectral(data, sfreq=256.0, fmin=1.0, fmax=45.0, coh_thresho
     
     np.fill_diagonal(coh_matrix, 0.0)
     
-    # === Построение edge_index и edge_attr ===
     edge_index = []
     edge_attr = []
     for i in range(n_ch):
@@ -97,6 +92,36 @@ def signal_to_graph_spectral(data, sfreq=256.0, fmin=1.0, fmax=45.0, coh_thresho
     
     graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
     return graph, coh_matrix
+
+
+def augment_with_sliding_window(clean_data_list, label_list, channel_names_list, 
+                                 window_size=7680, step_size=3840):
+    """
+    Создаёт несколько перекрывающихся окон из каждой записи (аугментация данных).
+    """
+    print("🔄 Аугментация данных скользящим окном...")
+    
+    augmented_data = []
+    augmented_labels = []
+    augmented_ch_names = []
+    
+    for i, (data, label, ch_names) in enumerate(zip(clean_data_list, label_list, channel_names_list)):
+        if data.shape[1] < window_size:
+            continue
+        
+        n_windows = max(1, (data.shape[1] - window_size) // step_size + 1)
+        
+        for j in range(n_windows):
+            start = j * step_size
+            window = data[:, start:start + window_size]
+            augmented_data.append(window)
+            augmented_labels.append(label)
+            augmented_ch_names.append(ch_names)
+    
+    print(f"✅ Увеличено с {len(clean_data_list)} до {len(augmented_data)} графов "
+          f"({len(augmented_data)/max(len(clean_data_list),1):.1f}x)")
+    
+    return augmented_data, augmented_labels, augmented_ch_names
 
 
 def rebuild_graph_dataset_spectral(clean_data_list, label_list, channel_names_list, sfreq=256, coh_threshold=0.1):
@@ -156,7 +181,7 @@ def plot_channel_selection_results(results, importance_map, save_path=None):
     
     best_result = max(results, key=lambda x: x['f1'] / max(x['n_channels'], 1))
     ax1.axvline(best_result['n_channels'], color='green', linestyle=':', linewidth=2, 
-                label=f"{best_result['n_channels']} кан.")
+                label=f"{best_result['n_channels']} каналов")
     ax1.legend(fontsize=9)
     
     # График 2: Важность каналов
@@ -192,7 +217,6 @@ def plot_channel_selection_results(results, importance_map, save_path=None):
             print(f"⚠️ Не удалось сохранить график: {e}")
     
     plt.show()
-
 
 def find_common_channels(dataset_channel_names, min_frequency=0.95):
     """Находит каналы, присутствующие в заданной доле графов."""
@@ -300,7 +324,6 @@ def diagnose_dataset(graph_dataset, dataset_channel_names):
     n_edges_per_graph = [g.edge_index.shape[1] for g in graph_dataset]
     print(f"🔗 Рёбра на граф: min={min(n_edges_per_graph)}, max={max(n_edges_per_graph)}, mean={np.mean(n_edges_per_graph):.1f}")
     
-    # Проверка признаков
     if len(graph_dataset) > 0:
         n_features = graph_dataset[0].x.shape[1]
         print(f"🎯 Признаков на узел: {n_features}")
@@ -393,15 +416,16 @@ def extract_channel_importance(model, dataset, dataset_ch_names, device, channel
 
 class GATClassifierImproved(torch.nn.Module):
     """
-    Улучшенная модель GAT с 7 входными признаками и увеличенной ёмкостью.
+    Улучшенная модель GAT с 7 входными признаками.
     """
     def __init__(self, in_channels=7, hidden_channels=64, out_channels=2, heads=4):
         super().__init__()
         self.conv1 = GATv2Conv(in_channels, hidden_channels, heads=heads, edge_dim=1)
         self.conv2 = GATv2Conv(hidden_channels * heads, hidden_channels, heads=2, edge_dim=1)
         
-        self.classifier = torch.nn.Linear(hidden_channels * 2, out_channels)  # 128 → 2
-        self.dropout = torch.nn.Dropout(0.4)
+       
+        self.classifier = torch.nn.Linear(hidden_channels * 2, out_channels)
+        self.dropout = torch.nn.Dropout(0.2)  
 
     def forward(self, x, edge_index, edge_attr, batch):
         x = self.conv1(x, edge_index, edge_attr)
@@ -412,20 +436,21 @@ class GATClassifierImproved(torch.nn.Module):
         x = global_mean_pool(x, batch)
         return self.classifier(x)
 
-
 def iterative_selection_common_channels(
     graph_dataset,
     dataset_channel_names,
     device,
     min_frequency=0.95,
     min_channels=5,
-    max_epochs=100,
+    max_epochs=200,      
     accuracy_threshold=0.90,
-    class_weight_ratio=1.8,
+    class_weight_ratio=3.0,  
+    learning_rate=0.003, 
     verbose=True
 ):
     """Итеративный отбор каналов с улучшенной моделью."""
     
+
     diagnose_dataset(graph_dataset, dataset_channel_names)
     
     if verbose:
@@ -435,7 +460,7 @@ def iterative_selection_common_channels(
     
     if len(common_channels) < min_channels + 2:
         raise ValueError(f"Слишком мало общих каналов ({len(common_channels)}).")
-    
+
     if verbose:
         print(f"\n🔄 Фильтрация датасета до {len(common_channels)} общих каналов...")
     
@@ -445,7 +470,6 @@ def iterative_selection_common_channels(
     
     if len(filtered_dataset) < 20:
         raise ValueError("Слишком мало графов после фильтрации!")
-    
 
     labels = [g.y.item() for g in filtered_dataset]
     label_counts = Counter(labels)
@@ -457,7 +481,6 @@ def iterative_selection_common_channels(
             print(f"\n⚖️ Веса классов: Interictal={class_weights[0].item():.2f}, Preictal={class_weights[1].item():.2f}")
             print(f"   Распределение: Interictal={label_counts[0]}, Preictal={label_counts[1]}")
     
-  
     if verbose:
         print("\n" + "="*70)
         print("🔧 ЭТАП 1: Обучение на полном наборе общих каналов")
@@ -473,11 +496,11 @@ def iterative_selection_common_channels(
     
     n_features = train_ds[0].x.shape[1]
     model = GATClassifierImproved(in_channels=n_features, hidden_channels=64, out_channels=2).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
     best_val_f1 = 0
     best_model_state = None
-    patience = 20
+    patience = 50  
     patience_counter = 0
     
     for epoch in range(max_epochs):
@@ -491,8 +514,8 @@ def iterative_selection_common_channels(
         else:
             patience_counter += 1
         
-        if verbose and (epoch + 1) % 10 == 0:
-            print(f"  Epoch {epoch+1:02d}: Loss={loss:.4f}, Val Acc={val_acc:.3f}, F1={val_f1:.3f}")
+        if verbose and (epoch + 1) % 20 == 0:
+            print(f"  Epoch {epoch+1:03d}: Loss={loss:.4f}, Val Acc={val_acc:.3f}, F1={val_f1:.3f}")
         
         if patience_counter >= patience:
             if verbose:
@@ -572,7 +595,7 @@ def iterative_selection_common_channels(
         val_loader = DataLoader(val_filt, batch_size=16)
         
         model = GATClassifierImproved(in_channels=n_features, hidden_channels=64, out_channels=2).to(device)
-        optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
         
         best_val_f1_iter = 0
         best_model_state_iter = None
@@ -604,7 +627,6 @@ def iterative_selection_common_channels(
                 print(f"   ⚠️ Ниже порога, стоп.")
             break
     
-
     best_result = max(results, key=lambda x: x['f1'] / max(x['n_channels'], 1))
     
     if verbose:
@@ -618,7 +640,6 @@ def iterative_selection_common_channels(
     
     return results, best_result, importance_map, common_channels
 
-
 if __name__ == "__main__":
     # Проверка наличия данных
     if 'clean_data_list' not in globals() or 'label_list' not in globals() or 'channel_names_list' not in globals():
@@ -626,16 +647,23 @@ if __name__ == "__main__":
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"🖥️ Устройство: {device}")
+    print("\n" + "="*70)
+    print("🔧 АУГМЕНТАЦИЯ ДАННЫХ (СКОЛЬЗЯЩЕЕ ОКНО)")
+    print("="*70)
     
-
+    clean_data_aug, labels_aug, ch_names_aug = augment_with_sliding_window(
+        clean_data_list, label_list, channel_names_list, 
+        window_size=7680, step_size=3840  # 50% перекрытие
+    )
+    
     print("\n" + "="*70)
     print("🔧 ПОДГОТОВКА ДАННЫХ СО СПЕКТРАЛЬНЫМИ ПРИЗНАКАМИ")
     print("="*70)
     
     graph_dataset, channel_names_list_new = rebuild_graph_dataset_spectral(
-        clean_data_list, label_list, channel_names_list, sfreq=256, coh_threshold=0.1
+        clean_data_aug, labels_aug, ch_names_aug, sfreq=256, coh_threshold=0.1
     )
-    
+  
     print("\n🔍 Поиск оптимального порога частоты каналов...")
     
     best_frequency = 0.95
@@ -659,28 +687,27 @@ if __name__ == "__main__":
     else:
         print(f"\n✅ Выбран порог: {best_frequency*100:.0f}% ({best_n_channels} каналов)")
     
-    # === ЗАПУСК ОСНОВНОЙ ФУНКЦИИ ===
+  
     results, best_result, importance_map, common_channels = iterative_selection_common_channels(
         graph_dataset=graph_dataset,
         dataset_channel_names=channel_names_list_new,
         device=device,
         min_frequency=best_frequency,
         min_channels=5,
-        max_epochs=100,
+        max_epochs=200,         
         accuracy_threshold=0.90,
-        class_weight_ratio=1.8,
+        class_weight_ratio=3.0,  
+        learning_rate=0.003,    
         verbose=True
     )
     
-
-    plot_channel_selection_results(results, importance_map, save_path='channel_selection_improved.png')
-    pd.DataFrame(results).to_csv('channel_selection_improved.csv', index=False, encoding='utf-8-sig')
+ 
+    plot_channel_selection_results(results, importance_map, save_path='channel_selection_final.png')
+    pd.DataFrame(results).to_csv('channel_selection_final.csv', index=False, encoding='utf-8-sig')
     
 
-    print("\n" + "🎓"*35)
-    print("РЕЗУЛЬТАТЫ ОТБОРА КАНАЛОВ (УЛУЧШЕННАЯ МОДЕЛЬ)")
     print("🎓"*35)
-    print(f"📊 Всего графов: {len(graph_dataset)}")
+    print(f"📊 Всего графов: {len(graph_dataset)} (после аугментации)")
     print(f"🎯 Признаков на узел: 7 (mean, std + 5 частотных полос)")
     print(f"🎯 Порог включения: {best_frequency*100:.0f}% графов")
     print(f"✅ Исходно общих каналов: {len(common_channels)}")
@@ -693,9 +720,9 @@ if __name__ == "__main__":
         print(f"   {i:2d}. {ch}")
     print("🎓"*35)
     
- 
-    with open('selected_channels_improved.txt', 'w', encoding='utf-8') as f:
-        f.write("Отобранные каналы ЭЭГ (улучшенная модель со спектральными признаками)\n")
+
+    with open('selected_channels_final.txt', 'w', encoding='utf-8') as f:
+        f.write("Отобранные каналы ЭЭГ (финальная версия с аугментацией)\n")
         f.write(f"Количество: {best_result['n_channels']}\n")
         f.write(f"F1-score: {best_result['f1']:.3f}\n")
         f.write(f"Accuracy: {best_result['accuracy']:.3f}\n")
@@ -703,9 +730,3 @@ if __name__ == "__main__":
         f.write("Список каналов:\n")
         for ch in best_result['selected_channels']:
             f.write(f"{ch}\n")
-    
-    print("\n💾 Результаты сохранены:")
-    print("   • channel_selection_improved.png (график)")
-    print("   • channel_selection_improved.csv (таблица)")
-    print("   • selected_channels_improved.txt (список каналов)")
-    print("\n🎉 Готово!")
