@@ -1,0 +1,353 @@
+import numpy as np
+import mne
+from mne.time_frequency import psd_array_welch
+import warnings
+
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+file_paths = [
+    r'C:\Users\ejevi\Downloads\chb02_30.edf',
+    r'C:\Users\ejevi\Downloads\chb04_08.edf',  #1
+    r'C:\Users\ejevi\Downloads\chb04_01.edf',
+    r'C:\Users\ejevi\Downloads\chb04_28.edf',  #3
+    r'C:\Users\ejevi\Downloads\chb02_09.edf',
+    r'C:\Users\ejevi\Downloads\chb02_16+.edf', #5
+    r'C:\Users\ejevi\Downloads\chb01_07.edf',
+    r'C:\Users\ejevi\Downloads\chb04_05.edf',  #7
+    r'C:\Users\ejevi\Downloads\chb02_06.edf',
+    r'C:\Users\ejevi\Downloads\chb02_19.edf',  #9
+    r'C:\Users\ejevi\Downloads\chb01_06.edf',
+    r'C:\Users\ejevi\Downloads\chb01_04.edf',  #11
+    r'C:\Users\ejevi\Downloads\chb01_01.edf',
+    r'C:\Users\ejevi\Downloads\chb01_12.edf',
+    r'C:\Users\ejevi\Downloads\chb01_18.edf',  #14
+    r'C:\Users\ejevi\Downloads\chb06_01.edf',  #15
+    r'C:\Users\ejevi\Downloads\chb06_04.edf',  #16
+    r'C:\Users\ejevi\Downloads\chb06_14.edf',
+    r'C:\Users\ejevi\Downloads\chb06_18.edf',  #18
+    r'C:\Users\ejevi\Downloads\chb06_24.edf',  #19
+    r'C:\Users\ejevi\Downloads\chb06_08.edf',
+    r'C:\Users\ejevi\Downloads\chb13_40.edf',  #21
+    r'C:\Users\ejevi\Downloads\chb13_55.edf',  #22
+    r'C:\Users\ejevi\Downloads\chb13_21.edf',  #23
+    r'C:\Users\ejevi\Downloads\chb13_04.edf',
+    r'C:\Users\ejevi\Downloads\chb13_15.edf',
+    r'C:\Users\ejevi\Downloads\chb20_21.edf',
+    r'C:\Users\ejevi\Downloads\chb20_31.edf',
+    r'C:\Users\ejevi\Downloads\chb20_12.edf',  #28
+    r'C:\Users\ejevi\Downloads\chb20_13.edf',  #29
+    r'C:\Users\ejevi\Downloads\chb20_68.edf',  #30
+    r'C:\Users\ejevi\Downloads\chb20_06.edf',
+    r'C:\Users\ejevi\Downloads\chb10_06.edf',
+    r'C:\Users\ejevi\Downloads\chb10_08.edf',
+    r'C:\Users\ejevi\Downloads\chb10_20.edf',  #34
+    r'C:\Users\ejevi\Downloads\chb10_22.edf',
+    r'C:\Users\ejevi\Downloads\chb10_30.edf',  #36
+    r'C:\Users\ejevi\Downloads\chb10_89.edf',  #37
+    r'C:\Users\ejevi\Downloads\chb18_30.edf',  #38
+    r'C:\Users\ejevi\Downloads\chb18_32.edf',  #39
+    r'C:\Users\ejevi\Downloads\chb18_35.edf',  #40
+    r'C:\Users\ejevi\Downloads\chb18_01.edf',
+    r'C:\Users\ejevi\Downloads\chb18_08.edf',
+    r'C:\Users\ejevi\Downloads\chb18_15.edf',
+    r'C:\Users\ejevi\Downloads\chb16_14.edf',  #44
+    r'C:\Users\ejevi\Downloads\chb16_18.edf',  #45
+    r'C:\Users\ejevi\Downloads\chb16_10.edf',  #46
+    r'C:\Users\ejevi\Downloads\chb16_01.edf',
+    r'C:\Users\ejevi\Downloads\chb16_06.edf',
+    r'C:\Users\ejevi\Downloads\chb16_19.edf',
+    r'C:\Users\ejevi\Downloads\chb08_02.edf',  #50
+    r'C:\Users\ejevi\Downloads\chb08_05.edf',  #51
+    r'C:\Users\ejevi\Downloads\chb08_10.edf',
+    r'C:\Users\ejevi\Downloads\chb08_13.edf',  #53
+    r'C:\Users\ejevi\Downloads\chb08_14.edf',
+    r'C:\Users\ejevi\Downloads\chb08_21.edf',  #55
+    r'C:\Users\ejevi\Downloads\chb12_06.edf',  #56
+    r'C:\Users\ejevi\Downloads\chb12_09.edf',  #57
+    r'C:\Users\ejevi\Downloads\chb12_23.edf',  #58
+    r'C:\Users\ejevi\Downloads\chb12_19.edf',
+    r'C:\Users\ejevi\Downloads\chb12_28.edf',  #60
+    r'C:\Users\ejevi\Downloads\chb12_32.edf',
+    r'C:\Users\ejevi\Downloads\chb12_40.edf',
+    r'C:\Users\ejevi\Downloads\chb05_01.edf',
+    r'C:\Users\ejevi\Downloads\chb05_06.edf',  #64
+    r'C:\Users\ejevi\Downloads\chb05_16.edf',  #65
+    r'C:\Users\ejevi\Downloads\chb05_17.edf',  #66
+    r'C:\Users\ejevi\Downloads\chb05_10.edf',
+    r'C:\Users\ejevi\Downloads\chb05_20.edf',
+    r'C:\Users\ejevi\Downloads\chb05_27.edf',
+    r'C:\Users\ejevi\Downloads\chb05_34.edf',
+    r'C:\Users\ejevi\Downloads\chb07_06.edf',
+    r'C:\Users\ejevi\Downloads\chb07_07.edf',
+    r'C:\Users\ejevi\Downloads\chb07_13.edf',  #73
+    r'C:\Users\ejevi\Downloads\chb07_12.edf',  #74
+    r'C:\Users\ejevi\Downloads\chb07_01.edf',
+    r'C:\Users\ejevi\Downloads\chb07_18.edf',
+    r'C:\Users\ejevi\Downloads\chb03_01.edf',  #77
+    r'C:\Users\ejevi\Downloads\chb03_02.edf',  #78
+    r'C:\Users\ejevi\Downloads\chb03_03.edf',  #79
+    r'C:\Users\ejevi\Downloads\chb03_04.edf',  #80
+    r'C:\Users\ejevi\Downloads\chb03_05.edf',
+    r'C:\Users\ejevi\Downloads\chb03_25.edf',
+    r'C:\Users\ejevi\Downloads\chb03_28.edf',
+    r'C:\Users\ejevi\Downloads\chb03_32.edf',
+    r'C:\Users\ejevi\Downloads\chb09_01.edf',
+    r'C:\Users\ejevi\Downloads\chb09_05.edf',
+    r'C:\Users\ejevi\Downloads\chb09_06.edf',  #87
+    r'C:\Users\ejevi\Downloads\chb09_08.edf',  #88
+    r'C:\Users\ejevi\Downloads\chb09_10.edf',
+    r'C:\Users\ejevi\Downloads\chb09_17.edf',
+    r'C:\Users\ejevi\Downloads\chb09_19.edf',  #91
+    r'C:\Users\ejevi\Downloads\chb09_12.edf',
+    r'C:\Users\ejevi\Downloads\chb09_18.edf',
+    r'C:\Users\ejevi\Downloads\chb09_04.edf',
+    r'C:\Users\ejevi\Downloads\chb14_04.edf',  #95
+    r'C:\Users\ejevi\Downloads\chb14_06.edf',  #96
+    r'C:\Users\ejevi\Downloads\chb14_12.edf',
+    r'C:\Users\ejevi\Downloads\chb14_16.edf',
+    r'C:\Users\ejevi\Downloads\chb14_18.edf',  #99
+    r'C:\Users\ejevi\Downloads\chb14_01.edf',
+    r'C:\Users\ejevi\Downloads\chb14_03.edf',  #101
+    r'C:\Users\ejevi\Downloads\chb14_25.edf',
+    r'C:\Users\ejevi\Downloads\chb15_01.edf',
+    r'C:\Users\ejevi\Downloads\chb15_02.edf',
+    r'C:\Users\ejevi\Downloads\chb15_03.edf',
+    r'C:\Users\ejevi\Downloads\chb15_04.edf',
+    r'C:\Users\ejevi\Downloads\chb15_05.edf',
+    r'C:\Users\ejevi\Downloads\chb15_07.edf',
+    r'C:\Users\ejevi\Downloads\chb17a_03.edf', #109
+    r'C:\Users\ejevi\Downloads\chb17a_04.edf', #110
+    r'C:\Users\ejevi\Downloads\chb17b_63.edf', #111
+]
+
+labels = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1,
+          1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 1,
+          1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1,
+          1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1,
+          1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0,
+          0, 0, 0, 0, 0, 0, 1, 1, 1]
+
+# Проверка
+assert len(file_paths) == len(labels), f"Несовпадение: {len(file_paths)} файлов, {len(labels)} меток"
+print(f"Начинается обработка {len(file_paths)} записей...")
+
+
+clean_data_list = []
+label_list = []
+channel_names_list = []
+
+for file_path, label in zip(file_paths, labels):
+    print(f"\nОбработка файла: {file_path}")
+    
+    try:
+        # === 1. Загрузка ===
+        raw = mne.io.read_raw_edf(file_path, preload=True, verbose=False)
+        
+        # === 2. Фильтрация ТОЛЬКО мусора ===
+        bad_prefixes = ('--', '.', 'EEG', 'ECG', 'EMG', 'EKG', 'DC')
+        valid_channels = []
+        for ch in raw.ch_names:
+            ch_clean = ch.strip()
+            if not ch_clean:
+                continue
+            if any(ch_clean.upper().startswith(p) for p in bad_prefixes):
+                continue
+            # Пропускаем, если нет букв (только цифры/символы)
+            if not any(c.isalpha() for c in ch_clean):
+                continue
+            valid_channels.append(ch_clean)
+        
+        # Удаление дубликатов
+        seen = set()
+        unique_channels = []
+        for ch in valid_channels:
+            if ch not in seen:
+                unique_channels.append(ch)
+                seen.add(ch)
+        valid_channels = unique_channels
+        
+        if len(valid_channels) < 5:
+            print(f" → Пропущено: мало каналов ({len(valid_channels)})")
+            continue
+        
+        raw.pick(valid_channels)
+        
+        eeg_times = raw.times
+        if "chb01_04" in file_path:
+            tmin, tmax = 1450, 1570
+        elif "chb01_18" in file_path:
+            tmin, tmax = 1700, 1820
+        elif "chb02_16+" in file_path:
+            tmin, tmax = 2960, 3080
+        elif "chb02_19" in file_path or "chb12_06" in file_path:
+            tmin, tmax = 3340, 3460
+        elif "chb04_05" in file_path or "chb06_18" in file_path:
+            tmin, tmax = 7750, 7870
+        elif "chb04_08" in file_path:
+            tmin, tmax = 6440, 6560
+        elif "chb04_28" in file_path:
+            tmin, tmax = 3780, 3900
+        elif "chb06_01" in file_path:
+            tmin, tmax = 7410, 7530
+        elif "chb06_04" in file_path:
+            tmin, tmax = 270, 390
+        elif "chb06_24" in file_path:
+            tmin, tmax = 9300, 9420
+        elif "chb13_21" in file_path:
+            tmin, tmax = 900, 1020
+        elif "chb13_40" in file_path or "chb18_30" in file_path:
+            tmin, tmax = 500, 620
+        elif "chb13_55" in file_path:
+            tmin, tmax = 400, 520
+        elif "chb20_12" in file_path:
+            tmin, tmax = 60, 180
+        elif "chb20_13" in file_path:
+            tmin, tmax = 2440, 2560
+        elif "chb20_68" in file_path or "chb10_89" in file_path:
+            tmin, tmax = 1350, 1470
+        elif "chb10_20" in file_path:
+            tmin, tmax = 6850, 6970
+        elif "chb10_30" in file_path or "chb12_09" in file_path:
+            tmin, tmax = 3000, 3120
+        elif "chb18_32" in file_path:
+            tmin, tmax = 1850, 1970
+        elif "chb18_35" in file_path:
+            tmin, tmax = 2170, 2290
+        elif "chb16_10" in file_path:
+            tmin, tmax = 2200, 2320
+        elif "chb16_14" in file_path:
+            tmin, tmax = 1800, 1920
+        elif "chb16_18" in file_path or "chb14_06" in file_path:
+            tmin, tmax = 1850, 1970
+        elif "chb08_02" in file_path:
+            tmin, tmax = 2670, 2790
+        elif "chb08_05" in file_path:
+            tmin, tmax = 2850, 2970
+        elif "chb08_13" in file_path:
+            tmin, tmax = 2420, 2540
+        elif "chb08_21" in file_path:
+            tmin, tmax = 2080, 2200
+        elif "chb12_23" in file_path:
+            tmin, tmax = 600, 720
+        elif "chb12_28" in file_path:
+            tmin, tmax = 140, 260
+        elif "chb05_06" in file_path or "chb03_03" in file_path:
+            tmin, tmax = 410, 530
+        elif "chb05_16" in file_path:
+            tmin, tmax = 2300, 2420
+        elif "chb05_17" in file_path:
+            tmin, tmax = 2450, 2570
+        elif "chb07_12" in file_path:
+            tmin, tmax = 4900, 5020
+        elif "chb07_13" in file_path:
+            tmin, tmax = 3280, 3400
+        elif "chb03_01" in file_path:
+            tmin, tmax = 330, 450
+        elif "chb03_02" in file_path:
+            tmin, tmax = 700, 820
+        elif "chb03_04" in file_path:
+            tmin, tmax = 2100, 2220
+        elif "chb09_06" in file_path:
+            tmin, tmax = 12200, 12320
+        elif "chb09_08" in file_path:
+            tmin, tmax = 2940, 3060
+        elif "chb09_19" in file_path:
+            tmin, tmax = 5250, 5370
+        elif "chb14_03" in file_path:
+            tmin, tmax = 1950, 2070
+        elif "chb14_04" in file_path:
+            tmin, tmax = 2750, 2870
+        elif "chb14_18" in file_path:
+            tmin, tmax = 1000, 1120
+        elif "chb17a_03" in file_path:
+            tmin, tmax = 2270, 2390
+        elif "chb17a_04" in file_path:
+            tmin, tmax = 3020, 3140
+        elif "chb17b_63" in file_path:
+            tmin, tmax = 3120, 3240
+        else:
+            tmin, tmax = 0, min(120, raw.times[-1])
+        
+        if tmax > raw.times[-1]:
+            tmax = raw.times[-1]
+        raw.crop(tmin=tmin, tmax=tmax, include_tmax=False)
+       
+        try:
+            raw.set_eeg_reference('average', projection=True, verbose=False)
+        except Exception:
+            pass
+        raw.filter(l_freq=1.0, h_freq=45.0, fir_design='firwin', verbose=False)
+        
+        # === 5. ICA ===
+        n_ch = len(raw.ch_names)
+        n_components = min(max(1, n_ch - 1), 20)
+        ica = mne.preprocessing.ICA(
+            n_components=n_components,
+            random_state=42,
+            method='fastica',
+            max_iter=500,
+            verbose=False
+        )
+        ica.fit(raw)
+        
+        ica.exclude = []
+        data_sources = ica.get_sources(raw).get_data()  # (n_comp, n_times)
+        sfreq = raw.info['sfreq']
+        psds, freqs = psd_array_welch(data_sources, sfreq=sfreq, fmin=1, fmax=80, n_fft=1024)  # расширяем до 80 Гц
+
+        for i, psd in enumerate(psds):
+            idx_60 = np.argmin(np.abs(freqs - 60))
+            if idx_60 < len(psd) and psd[idx_60] > np.percentile(psd, 90):
+                ica.exclude.append(i)
+        
+        raw_clean = ica.apply(raw.copy())
+       # === Количественная оценка качества очистки ===
+        from scipy.signal import butter, filtfilt
+
+        def bandpass_filter(data, lowcut, highcut, fs, order=4):
+            nyq = 0.5 * fs
+            low = lowcut / nyq
+            high = highcut / nyq
+            b, a = butter(order, [low, high], btype='band')
+            return filtfilt(b, a, data, axis=-1)
+
+        def compute_rms(data):
+            return np.sqrt(np.mean(data ** 2, axis=-1))
+
+        # Параметры
+        sfreq = raw.info['sfreq']
+        data_before = raw.get_data()          # до ICA
+        data_after = raw_clean.get_data()     # после ICA
+
+        # Общий RMS
+        rms_before_total = compute_rms(data_before)
+        rms_after_total = compute_rms(data_after)
+
+        # RMS в высокочастотном диапазоне (мышечные артефакты)
+        data_before_hf = bandpass_filter(data_before, 20, 45, sfreq)
+        data_after_hf = bandpass_filter(data_after, 20, 45, sfreq)
+        rms_before_hf = compute_rms(data_before_hf)
+        rms_after_hf = compute_rms(data_after_hf)
+
+        # Среднее по всем каналам
+        mean_rms_before = np.mean(rms_before_total)
+        mean_rms_after = np.mean(rms_after_total)
+        mean_rms_hf_before = np.mean(rms_before_hf)
+        mean_rms_hf_after = np.mean(rms_after_hf)
+
+        # Вывод
+        print(f" → RMS (все): {mean_rms_before:.2e} → {mean_rms_after:.2e} "
+              f"({(1 - mean_rms_after/mean_rms_before)*100:.1f}% снижения)")
+        print(f" → RMS (20–45 Гц): {mean_rms_hf_before:.2e} → {mean_rms_hf_after:.2e} "
+              f"({(1 - mean_rms_hf_after/mean_rms_hf_before)*100:.1f}% снижения)")
+        
+        # === 9. Сохранение результата ===
+        data_clean, _ = raw_clean.get_data(return_times=True)
+        clean_data_list.append(data_clean)
+        label_list.append(label)
+        channel_names_list.append(raw_clean.ch_names)
+    except Exception as e:
+        print(f" → Ошибка: {str(e)}")
+        continue
+
+print(f"\n✅ Обработано {len(clean_data_list)} записей из {len(file_paths)}.")
