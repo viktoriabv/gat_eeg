@@ -94,4 +94,4 @@ for data, label in zip(clean_data_list, label_list):
     except Exception as e:
         print(f"Ошибка: {e}")
 
-print(f"✅ Создано {len(graph_dataset)} графов.")
+print(f"Создано {len(graph_dataset)} графов.")
