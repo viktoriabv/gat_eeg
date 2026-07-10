@@ -99,7 +99,7 @@ def augment_with_sliding_window(clean_data_list, label_list, channel_names_list,
     """
     Создаёт несколько перекрывающихся окон из каждой записи (аугментация данных).
     """
-    print("🔄 Аугментация данных скользящим окном...")
+    print("Аугментация данных скользящим окном...")
     
     augmented_data = []
     augmented_labels = []
@@ -118,7 +118,7 @@ def augment_with_sliding_window(clean_data_list, label_list, channel_names_list,
             augmented_labels.append(label)
             augmented_ch_names.append(ch_names)
     
-    print(f"✅ Увеличено с {len(clean_data_list)} до {len(augmented_data)} графов "
+    print(f"Увеличено с {len(clean_data_list)} до {len(augmented_data)} графов "
           f"({len(augmented_data)/max(len(clean_data_list),1):.1f}x)")
     
     return augmented_data, augmented_labels, augmented_ch_names
@@ -128,7 +128,7 @@ def rebuild_graph_dataset_spectral(clean_data_list, label_list, channel_names_li
     """
     Пересоздаёт весь датасет со спектральными признаками.
     """
-    print("🔄 Пересоздание графов со спектральными признаками (7 признаков на узел)...")
+    print("Пересоздание графов со спектральными признаками (7 признаков на узел)...")
     
     new_dataset = []
     new_labels = []
@@ -144,11 +144,11 @@ def rebuild_graph_dataset_spectral(clean_data_list, label_list, channel_names_li
                 new_labels.append(label)
                 new_ch_names.append(ch_names)
         except Exception as e:
-            print(f"  ⚠️ Ошибка на графе {i}: {e}")
+            print(f"   Ошибка на графе {i}: {e}")
             continue
     
     label_counts = Counter(new_labels)
-    print(f"✅ Создано {len(new_dataset)} графов")
+    print(f"Создано {len(new_dataset)} графов")
     print(f"   Класс 0 (Interictal): {label_counts[0]}")
     print(f"   Класс 1 (Preictal): {label_counts[1]}")
     
@@ -158,7 +158,7 @@ def rebuild_graph_dataset_spectral(clean_data_list, label_list, channel_names_li
 def plot_channel_selection_results(results, importance_map, save_path=None):
     """Строит два графика: метрики vs каналы + важность каналов."""
     if len(results) == 0:
-        print("⚠️ Нет данных для визуализации!")
+        print("Нет данных для визуализации!")
         return
     
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -212,9 +212,9 @@ def plot_channel_selection_results(results, importance_map, save_path=None):
     if save_path:
         try:
             plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-            print(f"💾 График сохранён: {save_path}")
+            print(f" График сохранён: {save_path}")
         except Exception as e:
-            print(f"⚠️ Не удалось сохранить график: {e}")
+            print(f"Не удалось сохранить график: {e}")
     
     plt.show()
 
@@ -225,14 +225,14 @@ def find_common_channels(dataset_channel_names, min_frequency=0.95):
     threshold = min_frequency * n_graphs
     common_channels = [ch for ch, count in channel_counts.items() if count >= threshold]
     
-    print(f"📊 Статистика каналов:")
+    print(f" Статистика каналов:")
     print(f"   Всего уникальных каналов: {len(channel_counts)}")
     print(f"   Каналов во всех графах (100%): {sum(1 for c in channel_counts if channel_counts[c] == n_graphs)}")
     print(f"   Каналов в >= 90% графов: {sum(1 for c in channel_counts if channel_counts[c] >= 0.9 * n_graphs)}")
     print(f"   Выбрано каналов (порог {min_frequency*100:.0f}%): {len(common_channels)}")
     
     most_common = channel_counts.most_common(10)
-    print(f"\n🔝 Топ-10 самых частых каналов:")
+    print(f"\n Топ-10 самых частых каналов:")
     for ch, cnt in most_common:
         print(f"   {ch}: {cnt}/{n_graphs} ({100*cnt/n_graphs:.1f}%)")
     
@@ -272,7 +272,7 @@ def filter_dataset_to_common_channels(dataset, dataset_channel_names, common_cha
         if new_g is not None:
             filtered.append(new_g)
             filtered_names.append(new_ch)
-    print(f"✅ Отфильтровано: {len(filtered)}/{len(dataset)} графов сохранено")
+    print(f" Отфильтровано: {len(filtered)}/{len(dataset)} графов сохранено")
     return filtered, filtered_names
 
 
@@ -310,7 +310,7 @@ def filter_graph_by_channels_simple(graph, keep_indices):
 def diagnose_dataset(graph_dataset, dataset_channel_names):
     """Печатает статистику датасета."""
     print("\n" + "="*70)
-    print("🔍 ДИАГНОСТИКА ДАТАСЕТА")
+    print(" ДИАГНОСТИКА ДАТАСЕТА")
     print("="*70)
     
     labels = [g.y.item() for g in graph_dataset]
@@ -326,11 +326,11 @@ def diagnose_dataset(graph_dataset, dataset_channel_names):
     
     if len(graph_dataset) > 0:
         n_features = graph_dataset[0].x.shape[1]
-        print(f"🎯 Признаков на узел: {n_features}")
+        print(f" Признаков на узел: {n_features}")
     
     empty_graphs = sum(1 for g in graph_dataset if g.edge_index.shape[1] == 0)
     if empty_graphs > 0:
-        print(f"⚠️ Пустых графов (без рёбер): {empty_graphs}")
+        print(f" Пустых графов (без рёбер): {empty_graphs}")
     print("="*70)
 
 
@@ -454,7 +454,7 @@ def iterative_selection_common_channels(
     diagnose_dataset(graph_dataset, dataset_channel_names)
     
     if verbose:
-        print(f"\n🎯 Поиск каналов, присутствующих в {min_frequency*100:.0f}% графов...")
+        print(f"\n Поиск каналов, присутствующих в {min_frequency*100:.0f}% графов...")
     
     common_channels = find_common_channels(dataset_channel_names, min_frequency=min_frequency)
     
@@ -462,7 +462,7 @@ def iterative_selection_common_channels(
         raise ValueError(f"Слишком мало общих каналов ({len(common_channels)}).")
 
     if verbose:
-        print(f"\n🔄 Фильтрация датасета до {len(common_channels)} общих каналов...")
+        print(f"\n Фильтрация датасета до {len(common_channels)} общих каналов...")
     
     filtered_dataset, filtered_ch_names = filter_dataset_to_common_channels(
         graph_dataset, dataset_channel_names, common_channels
@@ -478,7 +478,7 @@ def iterative_selection_common_channels(
     if len(label_counts) == 2:
         class_weights = torch.tensor([1.0, class_weight_ratio], dtype=torch.float).to(device)
         if verbose:
-            print(f"\n⚖️ Веса классов: Interictal={class_weights[0].item():.2f}, Preictal={class_weights[1].item():.2f}")
+            print(f"\n Веса классов: Interictal={class_weights[0].item():.2f}, Preictal={class_weights[1].item():.2f}")
             print(f"   Распределение: Interictal={label_counts[0]}, Preictal={label_counts[1]}")
     
     if verbose:
@@ -519,7 +519,7 @@ def iterative_selection_common_channels(
         
         if patience_counter >= patience:
             if verbose:
-                print(f"  ⏹️ Early stopping на эпохе {epoch+1}")
+                print(f"  Early stopping на эпохе {epoch+1}")
             break
     
     if best_model_state is not None:
@@ -528,8 +528,8 @@ def iterative_selection_common_channels(
     full_acc, full_f1 = evaluate_model(model, val_loader, device)
     
     if verbose:
-        print(f"\n✅ Полный набор ({len(common_channels)} каналов): Acc={full_acc:.3f}, F1={full_f1:.3f}")
-        print("\n📋 Classification Report (валидация):")
+        print(f"\n Полный набор ({len(common_channels)} каналов): Acc={full_acc:.3f}, F1={full_f1:.3f}")
+        print("\n Classification Report (валидация):")
         model.eval()
         all_preds, all_labels = [], []
         with torch.no_grad():
@@ -561,7 +561,7 @@ def iterative_selection_common_channels(
     
     if verbose:
         print("\n" + "="*70)
-        print("🔁 ЭТАП 2: Итеративный отбор")
+        print(" ЭТАП 2: Итеративный отбор")
         print("="*70)
     
     current_channels = set(common_channels)
@@ -580,8 +580,8 @@ def iterative_selection_common_channels(
         selected_list = list(current_channels)
         
         if verbose:
-            print(f"\n📍 Итерация {iteration}: {len(selected_list)} каналов")
-            print(f"   ✂️ Удалён: {least_important}")
+            print(f"\n  Итерация {iteration}: {len(selected_list)} каналов")
+            print(f"    Удалён: {least_important}")
         
         train_filt, train_ch_filt = filter_dataset_by_channels_list(train_ds, train_ch, selected_list)
         val_filt, val_ch_filt = filter_dataset_by_channels_list(val_ds, val_ch, selected_list)
@@ -612,7 +612,7 @@ def iterative_selection_common_channels(
         val_acc, val_f1 = evaluate_model(model, val_loader, device)
         
         if verbose:
-            print(f"   📈 Acc={val_acc:.3f}, F1={val_f1:.3f} | Порог: {threshold_f1:.3f}")
+            print(f"    Acc={val_acc:.3f}, F1={val_f1:.3f} | Порог: {threshold_f1:.3f}")
         
         results.append({
             'n_channels': len(selected_list),
@@ -624,19 +624,17 @@ def iterative_selection_common_channels(
         
         if val_f1 < threshold_f1:
             if verbose:
-                print(f"   ⚠️ Ниже порога, стоп.")
+                print(f"    Ниже порога, стоп.")
             break
     
     best_result = max(results, key=lambda x: x['f1'] / max(x['n_channels'], 1))
     
     if verbose:
-        print("\n" + "="*70)
-        print("🏆 ИТОГ")
         print("="*70)
-        print(f"✅ Лучший: {best_result['n_channels']} каналов, F1={best_result['f1']:.3f}")
-        print(f"📉 Сокращение: {len(common_channels) - best_result['n_channels']} каналов "
+        print(f" Лучший: {best_result['n_channels']} каналов, F1={best_result['f1']:.3f}")
+        print(f" Сокращение: {len(common_channels) - best_result['n_channels']} каналов "
               f"({100*(len(common_channels) - best_result['n_channels'])/len(common_channels):.1f}%)")
-        print(f"🎯 Отобранные: {best_result['selected_channels']}")
+        print(f" Отобранные: {best_result['selected_channels']}")
     
     return results, best_result, importance_map, common_channels
 
@@ -683,9 +681,9 @@ if __name__ == "__main__":
     
     if best_n_channels == 0:
         best_frequency = 0.8
-        print(f"⚠️ Используем порог 80% как последний вариант")
+        print(f" Используем порог 80% как последний вариант")
     else:
-        print(f"\n✅ Выбран порог: {best_frequency*100:.0f}% ({best_n_channels} каналов)")
+        print(f"\n Выбран порог: {best_frequency*100:.0f}% ({best_n_channels} каналов)")
     
   
     results, best_result, importance_map, common_channels = iterative_selection_common_channels(
@@ -705,20 +703,17 @@ if __name__ == "__main__":
     plot_channel_selection_results(results, importance_map, save_path='channel_selection_final.png')
     pd.DataFrame(results).to_csv('channel_selection_final.csv', index=False, encoding='utf-8-sig')
     
-
-    print("🎓"*35)
-    print(f"📊 Всего графов: {len(graph_dataset)} (после аугментации)")
-    print(f"🎯 Признаков на узел: 7 (mean, std + 5 частотных полос)")
-    print(f"🎯 Порог включения: {best_frequency*100:.0f}% графов")
-    print(f"✅ Исходно общих каналов: {len(common_channels)}")
-    print(f"✂️ После отбора: {best_result['n_channels']}")
-    print(f"💰 Экономия: {100*(len(common_channels)-best_result['n_channels'])/len(common_channels):.1f}%")
-    print(f"📈 F1-score: {best_result['f1']:.3f}")
-    print(f"📉 Accuracy: {best_result['accuracy']:.3f}")
-    print(f"\n🔌 Отобранные каналы ({best_result['n_channels']}):")
+    print(f" Всего графов: {len(graph_dataset)} (после аугментации)")
+    print(f" Признаков на узел: 7 (mean, std + 5 частотных полос)")
+    print(f" Порог включения: {best_frequency*100:.0f}% графов")
+    print(f" Исходно общих каналов: {len(common_channels)}")
+    print(f" После отбора: {best_result['n_channels']}")
+    print(f" Экономия: {100*(len(common_channels)-best_result['n_channels'])/len(common_channels):.1f}%")
+    print(f" F1-score: {best_result['f1']:.3f}")
+    print(f" Accuracy: {best_result['accuracy']:.3f}")
+    print(f"\n Отобранные каналы ({best_result['n_channels']}):")
     for i, ch in enumerate(best_result['selected_channels'], 1):
         print(f"   {i:2d}. {ch}")
-    print("🎓"*35)
     
 
     with open('selected_channels_final.txt', 'w', encoding='utf-8') as f:
