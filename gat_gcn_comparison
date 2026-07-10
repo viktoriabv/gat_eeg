@@ -129,7 +129,7 @@ def train_model_with_cv(model_class, graph_dataset, dataset_channel_names, commo
     print(f"{'='*70}")
     
     for fold, (train_idx, val_idx) in enumerate(kf.split(graph_dataset, labels)):
-        print(f"\n🔄 Fold {fold+1}/{n_splits}")
+        print(f"\n Fold {fold+1}/{n_splits}")
         
         train_ds = [graph_dataset[i] for i in train_idx]
         val_ds = [graph_dataset[i] for i in val_idx]
@@ -170,7 +170,7 @@ def train_model_with_cv(model_class, graph_dataset, dataset_channel_names, commo
                 val_ch_filt.append(new_ch)
         
         if len(train_filt) < 10 or len(val_filt) < 5:
-            print(f"   ⚠️ Пропущен fold {fold+1}: мало данных")
+            print(f"   Пропущен fold {fold+1}: мало данных")
             continue
         
         train_loader = DataLoader(train_filt, batch_size=16, shuffle=True)
@@ -223,7 +223,7 @@ def train_model_with_cv(model_class, graph_dataset, dataset_channel_names, commo
             'f1_preictal': final_metrics['report']['Preictal']['f1-score']
         })
         
-        print(f"   ✅ Fold {fold+1}: Acc={final_metrics['accuracy']:.3f}, F1={final_metrics['f1_weighted']:.3f}")
+        print(f"   Fold {fold+1}: Acc={final_metrics['accuracy']:.3f}, F1={final_metrics['f1_weighted']:.3f}")
     
     # Агрегация результатов
     mean_results = {
@@ -237,7 +237,7 @@ def train_model_with_cv(model_class, graph_dataset, dataset_channel_names, commo
         'f1_preictal': np.mean([r['f1_preictal'] for r in cv_results]),
     }
     
-    print(f"\n📊 {model_name} - СРЕДНИЕ РЕЗУЛЬТАТЫ CV:")
+    print(f"\n {model_name} - СРЕДНИЕ РЕЗУЛЬТАТЫ CV:")
     print(f"   Accuracy: {mean_results['accuracy']:.3f} ± {mean_results['accuracy_std']:.3f}")
     print(f"   F1-score: {mean_results['f1_weighted']:.3f} ± {mean_results['f1_weighted_std']:.3f}")
     print(f"   Precision: {mean_results['precision_weighted']:.3f}")
@@ -351,7 +351,7 @@ def plot_model_comparison(gat_results, gcn_results, save_path=None):
     
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
-        print(f"💾 График сравнения сохранён: {save_path}")
+        print(f" График сравнения сохранён: {save_path}")
     
     plt.show()
 
@@ -389,7 +389,7 @@ def save_comparison_results(gat_results, gcn_results, save_path='gat_vs_gcn_comp
     
     df = pd.DataFrame(comparison_data)
     df.to_csv(save_path, index=False, encoding='utf-8-sig')
-    print(f"💾 Таблица сравнения сохранена: {save_path}")
+    print(f" Таблица сравнения сохранена: {save_path}")
     
     return df
 
@@ -408,8 +408,8 @@ def compare_gat_vs_gcn(graph_dataset, channel_names_list, common_channels, devic
     label_counts = Counter(labels)
     class_weights = torch.tensor([1.0, class_weight_ratio], dtype=torch.float).to(device)
     
-    print(f"⚖️ Веса классов: Interictal=1.00, Preictal={class_weight_ratio:.1f}")
-    print(f"📊 Распределение: Interictal={label_counts[0]}, Preictal={label_counts[1]}")
+    print(f" Веса классов: Interictal=1.00, Preictal={class_weight_ratio:.1f}")
+    print(f" Распределение: Interictal={label_counts[0]}, Preictal={label_counts[1]}")
     
     
     gat_cv_results, gat_mean_results = train_model_with_cv(
@@ -428,20 +428,18 @@ def compare_gat_vs_gcn(graph_dataset, channel_names_list, common_channels, devic
     
     comparison_df = save_comparison_results(gat_mean_results, gcn_mean_results)
     
-    print("\n" + "🎓"*35)
     print("РЕЗУЛЬТАТЫ СРАВНЕНИЯ GAT vs GCN")
-    print("🎓"*35)
-    print(f"📊 Кросс-валидация: {n_splits}-fold")
-    print(f"📁 Всего графов: {len(graph_dataset)}")
-    print(f"🎯 Каналов: {len(common_channels)}")
-    print("\n📈 СРАВНЕНИЕ МЕТРИК:")
+    print(f" Кросс-валидация: {n_splits}-fold")
+    print(f" Всего графов: {len(graph_dataset)}")
+    print(f" Каналов: {len(common_channels)}")
+    print("\n СРАВНЕНИЕ МЕТРИК:")
     print(f"{'Метрика':<25} {'GAT':<20} {'GCN':<20} {'Улучшение':<15}")
     print("-"*80)
     print(f"{'Accuracy':<25} {gat_mean_results['accuracy']:.3f} ± {gat_mean_results['accuracy_std']:.3f}  {gcn_mean_results['accuracy']:.3f} ± {gcn_mean_results['accuracy_std']:.3f}  {(gat_mean_results['accuracy'] - gcn_mean_results['accuracy'])*100:+.1f}%")
     print(f"{'F1-score (weighted)':<25} {gat_mean_results['f1_weighted']:.3f} ± {gat_mean_results['f1_weighted_std']:.3f}  {gcn_mean_results['f1_weighted']:.3f} ± {gcn_mean_results['f1_weighted_std']:.3f}  {(gat_mean_results['f1_weighted'] - gcn_mean_results['f1_weighted'])*100:+.1f}%")
     print(f"{'F1 Interictal':<25} {gat_mean_results['f1_interictal']:.3f}  {gcn_mean_results['f1_interictal']:.3f}  {(gat_mean_results['f1_interictal'] - gcn_mean_results['f1_interictal'])*100:+.1f}%")
     print(f"{'F1 Preictal':<25} {gat_mean_results['f1_preictal']:.3f}  {gcn_mean_results['f1_preictal']:.3f}  {(gat_mean_results['f1_preictal'] - gcn_mean_results['f1_preictal'])*100:+.1f}%")
-    print("🎓"*35)
+   
     
     # === Статистическая значимость (t-test) ===
     from scipy import stats
@@ -454,9 +452,9 @@ def compare_gat_vs_gcn(graph_dataset, channel_names_list, common_channels, devic
         print(f"   t-statistic: {t_stat:.3f}")
         print(f"   p-value: {p_value:.4f}")
         if p_value < 0.05:
-            print(f"   ✅ Различие статистически значимо (p < 0.05)")
+            print(f"    Различие статистически значимо (p < 0.05)")
         else:
-            print(f"   ⚠️ Различие не статистически значимо (p >= 0.05)")
+            print(f"    Различие не статистически значимо (p >= 0.05)")
     
     print("\n💾 Результаты сохранены:")
     print("   • gat_vs_gcn_comparison.png (график)")
@@ -473,9 +471,9 @@ if __name__ == "__main__":
             raise NameError(f"Убедитесь, что {var} определён!")
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"🖥️ Устройство: {device}")
-    print(f"📁 Всего графов: {len(graph_dataset)}")
-    print(f"📡 Каналов: {len(common_channels)}")
+
+    print(f" Всего графов: {len(graph_dataset)}")
+    print(f" Каналов: {len(common_channels)}")
     
     gat_results, gcn_results, comparison_df = compare_gat_vs_gcn(
         graph_dataset=graph_dataset,
@@ -485,5 +483,3 @@ if __name__ == "__main__":
         class_weight_ratio=3.0,
         n_splits=5  # 5-fold кросс-валидация
     )
-    
-    print("\n🎉 Сравнение завершено!")
